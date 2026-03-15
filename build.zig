@@ -190,6 +190,7 @@ pub fn build(b: *std.Build) void {
         "src/train.zig",
         "src/gpu.zig",
         "src/gpu_train.zig",
+        "src/gguf.zig",
         "src/znap.zig",
     };
 
