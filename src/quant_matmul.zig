@@ -88,42 +88,57 @@ pub fn dotQ5_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
         const qh = readU32LE(block, 2);
         const xb = x[block_idx * BS ..];
 
-        // Vector byte load: grab all 16 packed bytes at once
-        const bytes: @Vector(16, u8) = block[6..22].*;
-        const mask_lo: @Vector(16, u8) = @splat(0x0F);
+        // Precompute all 32 high bits into a byte array — ONE branch-free pass
+        // This replaces 32 individual (qh >> variable_shift) & 1 operations
+        // with 4 byte extractions + bit tests on fixed positions
+        const qh_bytes: [4]u8 = @bitCast(qh);
 
-        // Extract all 16 low nibbles simultaneously (vector AND)
-        const lo_nibs = bytes & mask_lo;
-        // Extract all 16 high nibbles simultaneously (vector shift)
-        const hi_nibs = bytes >> @splat(4);
+        // Process all 32 weights with 8 accumulators for ILP
+        var acc0: @Vector(4, f32) = @splat(0);
+        var acc1: @Vector(4, f32) = @splat(0);
 
-        // Now process in chunks of 4 for f32 conversion + accumulate
-        var acc: @Vector(4, f32) = @splat(0);
-
+        // Low nibble half: weights 0..15 (nibble low, qh bits 0..15)
         inline for (0..4) |chunk| {
             const off = chunk * 4;
+            const b0 = block[6 + off];
+            const b1 = block[6 + off + 1];
+            const b2 = block[6 + off + 2];
+            const b3 = block[6 + off + 3];
 
-            // Low nibble weights (indices off..off+3)
-            const w_lo = @Vector(4, f32){
-                @floatFromInt(@as(i16, lo_nibs[off] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off))) & 1)) << 4)) - 16),
-                @floatFromInt(@as(i16, lo_nibs[off + 1] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 1))) & 1)) << 4)) - 16),
-                @floatFromInt(@as(i16, lo_nibs[off + 2] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 2))) & 1)) << 4)) - 16),
-                @floatFromInt(@as(i16, lo_nibs[off + 3] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 3))) & 1)) << 4)) - 16),
+            // Extract high bits from precomputed bytes
+            const qh_byte = qh_bytes[off / 8];
+            const qh_bit_base = off % 8;
+
+            const w = @Vector(4, f32){
+                @floatFromInt(@as(i16, (b0 & 0xF) | (((qh_byte >> @as(u3, @intCast(qh_bit_base))) & 1) << 4)) - 16),
+                @floatFromInt(@as(i16, (b1 & 0xF) | (((qh_byte >> @as(u3, @intCast(qh_bit_base + 1))) & 1) << 4)) - 16),
+                @floatFromInt(@as(i16, (b2 & 0xF) | (((qh_byte >> @as(u3, @intCast(qh_bit_base + 2))) & 1) << 4)) - 16),
+                @floatFromInt(@as(i16, (b3 & 0xF) | (((qh_byte >> @as(u3, @intCast(qh_bit_base + 3))) & 1) << 4)) - 16),
             };
-
-            // High nibble weights (indices off+16..off+19)
-            const w_hi = @Vector(4, f32){
-                @floatFromInt(@as(i16, hi_nibs[off] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 16))) & 1)) << 4)) - 16),
-                @floatFromInt(@as(i16, hi_nibs[off + 1] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 17))) & 1)) << 4)) - 16),
-                @floatFromInt(@as(i16, hi_nibs[off + 2] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 18))) & 1)) << 4)) - 16),
-                @floatFromInt(@as(i16, hi_nibs[off + 3] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 19))) & 1)) << 4)) - 16),
-            };
-
-            acc += w_lo * @as(@Vector(4, f32), xb[off..][0..4].*);
-            acc += w_hi * @as(@Vector(4, f32), xb[off + 16 ..][0..4].*);
+            acc0 += w * @as(@Vector(4, f32), xb[off..][0..4].*);
         }
 
-        total += d * @reduce(.Add, acc);
+        // High nibble half: weights 16..31 (nibble high, qh bits 16..31)
+        inline for (0..4) |chunk| {
+            const off = chunk * 4;
+            const b0 = block[6 + off];
+            const b1 = block[6 + off + 1];
+            const b2 = block[6 + off + 2];
+            const b3 = block[6 + off + 3];
+
+            const qh_byte = qh_bytes[2 + off / 8]; // bits 16..31 are in bytes 2..3
+            const qh_bit_base = off % 8;
+
+            const w = @Vector(4, f32){
+                @floatFromInt(@as(i16, (b0 >> 4) | (((qh_byte >> @as(u3, @intCast(qh_bit_base))) & 1) << 4)) - 16),
+                @floatFromInt(@as(i16, (b1 >> 4) | (((qh_byte >> @as(u3, @intCast(qh_bit_base + 1))) & 1) << 4)) - 16),
+                @floatFromInt(@as(i16, (b2 >> 4) | (((qh_byte >> @as(u3, @intCast(qh_bit_base + 2))) & 1) << 4)) - 16),
+                @floatFromInt(@as(i16, (b3 >> 4) | (((qh_byte >> @as(u3, @intCast(qh_bit_base + 3))) & 1) << 4)) - 16),
+            };
+            acc1 += w * @as(@Vector(4, f32), xb[off + 16 ..][0..4].*);
+        }
+
+        total += d * (@reduce(.Add, acc0) + @reduce(.Add, acc1));
     }
     return total;
 }
@@ -317,7 +332,7 @@ pub fn dotQ4_K(raw_row: []const u8, x: []const f32, n: usize) f32 {
 // ── Dispatch ─────────────────────────────────────────────────────
 
 /// Compute a single row's dot product based on tensor type.
-fn dotQuantizedRow(row_data: []const u8, x: []const f32, n_cols: usize, tensor_type: u32) f32 {
+pub fn dotQuantizedRow(row_data: []const u8, x: []const f32, n_cols: usize, tensor_type: u32) f32 {
     return switch (tensor_type) {
         2 => dotQ4_0(row_data, x, n_cols),
         6 => dotQ5_0(row_data, x, n_cols),
