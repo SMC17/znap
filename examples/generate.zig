@@ -99,11 +99,32 @@ fn runGGUF(
         }
     }
 
+    // Native quantized path — kernel math verified correct
+    const qw = model.quantizedWeights(allocator) catch null;
+    const use_q = qw != null;
+    if (use_q) {
+        // Print tensor types for first layer
+        const ql0 = &qw.?.layers[0];
+        try stderr.print("  Layer 0 types: wq={d} wk={d} wv={d} wo={d} w1={d} w2={d} w3={d}\n", .{
+            ql0.wq.tensor_type, ql0.wk.tensor_type, ql0.wv.tensor_type, ql0.wo.tensor_type,
+            ql0.w1.tensor_type, ql0.w2.tensor_type, ql0.w3.tensor_type,
+        });
+        try stderr.print("  Layer 0 cols: wq={d} wk={d} wv={d} wo={d} w1={d} w2={d} w3={d}\n", .{
+            ql0.wq.n_cols, ql0.wk.n_cols, ql0.wv.n_cols, ql0.wo.n_cols,
+            ql0.w1.n_cols, ql0.w2.n_cols, ql0.w3.n_cols,
+        });
+        try stderr.print("  Mode: native quantized\n\n", .{});
+    }
+
     var pos: u32 = 0;
     var actual_tokens: u32 = 0;
 
     while (pos < max_tokens and pos < model.config.seq_len) {
-        llama2.forward(model.config, &model.weights, &state, token, pos);
+        if (use_q) {
+            llama2.forwardQuantized(model.config, &model.weights, &qw.?, &state, token, pos);
+        } else {
+            llama2.forward(model.config, &model.weights, &state, token, pos);
+        }
 
         token = llama2.sample(state.logits, temperature, &rng);
 
