@@ -439,6 +439,174 @@ pub fn dotQ5_0Neon(raw_row: []const u8, x: []const f32, n: usize) f32 {
     return result;
 }
 
+/// NEON Q8_0 row dot product — simplest format, fastest kernel.
+/// Q8_0 block: [f16 scale (2)] [32 × i8 values] = 34 bytes per 32 weights.
+/// No bit extraction — just load i8, widen to i16, widen to i32, convert to f32, FMLA.
+pub fn dotQ8_0Neon(raw_row: []const u8, x: []const f32, n: usize) f32 {
+    if (builtin.cpu.arch != .aarch64) {
+        const quant = @import("quant_matmul.zig");
+        return quant.dotQ8_0(raw_row, x, n);
+    }
+
+    const n_blocks = n / 32;
+    var result: f32 = undefined;
+
+    asm volatile (
+        \\mov x11, x0
+        \\mov x12, x1
+        \\mov x13, x2
+        \\movi v30.4s, #0
+        \\1:
+        \\cbz x13, 2f
+        // Load scale
+        \\ldr h0, [x11]
+        \\fcvt s0, h0
+        // Load 32 i8 values (2 × 16-byte loads)
+        \\ldr q1, [x11, #2]
+        \\ldr q2, [x11, #18]
+        // Widen first 16 i8 to i16
+        \\sxtl v6.8h, v1.8b
+        \\sxtl2 v7.8h, v1.16b
+        // Widen to i32 and convert to f32
+        \\sxtl v10.4s, v6.4h
+        \\sxtl2 v11.4s, v6.8h
+        \\sxtl v12.4s, v7.4h
+        \\sxtl2 v13.4s, v7.8h
+        \\scvtf v10.4s, v10.4s
+        \\scvtf v11.4s, v11.4s
+        \\scvtf v12.4s, v12.4s
+        \\scvtf v13.4s, v13.4s
+        // Load x[0..15] and FMLA
+        \\ldp q20, q21, [x12]
+        \\ldp q22, q23, [x12, #32]
+        \\fmul v10.4s, v10.4s, v20.4s
+        \\fmla v10.4s, v11.4s, v21.4s
+        \\fmla v10.4s, v12.4s, v22.4s
+        \\fmla v10.4s, v13.4s, v23.4s
+        // Widen second 16 i8
+        \\sxtl v6.8h, v2.8b
+        \\sxtl2 v7.8h, v2.16b
+        \\sxtl v14.4s, v6.4h
+        \\sxtl2 v15.4s, v6.8h
+        \\sxtl v16.4s, v7.4h
+        \\sxtl2 v17.4s, v7.8h
+        \\scvtf v14.4s, v14.4s
+        \\scvtf v15.4s, v15.4s
+        \\scvtf v16.4s, v16.4s
+        \\scvtf v17.4s, v17.4s
+        // Load x[16..31] and FMLA
+        \\ldp q24, q25, [x12, #64]
+        \\ldp q26, q27, [x12, #96]
+        \\fmla v10.4s, v14.4s, v24.4s
+        \\fmla v10.4s, v15.4s, v25.4s
+        \\fmla v10.4s, v16.4s, v26.4s
+        \\fmla v10.4s, v17.4s, v27.4s
+        // Reduce and scale
+        \\faddp v10.4s, v10.4s, v10.4s
+        \\faddp v10.2s, v10.2s, v10.2s
+        \\fmul s10, s10, s0
+        \\fadd s30, s30, s10
+        // Advance pointers
+        \\add x11, x11, #34
+        \\add x12, x12, #128
+        \\sub x13, x13, #1
+        \\b 1b
+        \\2:
+        \\fmov w8, s30
+        : [out] "={w8}" (result),
+        : [raw] "{x0}" (raw_row.ptr),
+          [x] "{x1}" (x.ptr),
+          [nb] "{x2}" (n_blocks),
+        : "v0","v1","v2","v6","v7","v10","v11","v12","v13","v14","v15","v16","v17","v20","v21","v22","v23","v24","v25","v26","v27","v30","w6","w7","memory"
+    );
+
+    return result;
+}
+
+/// NEON Q4_0 row dot product — 4-bit nibbles, no high bit.
+/// Simpler than Q5_0: just split nibbles, subtract 8, widen, FMLA.
+pub fn dotQ4_0Neon(raw_row: []const u8, x: []const f32, n: usize) f32 {
+    if (builtin.cpu.arch != .aarch64) {
+        const quant = @import("quant_matmul.zig");
+        return quant.dotQ4_0(raw_row, x, n);
+    }
+
+    const n_blocks = n / 32;
+    var result: f32 = undefined;
+
+    asm volatile (
+        \\mov x11, x0
+        \\mov x12, x1
+        \\mov x13, x2
+        \\movi v30.4s, #0
+        \\movi v5.16b, #0x0f
+        \\movi v18.8h, #8
+        \\1:
+        \\cbz x13, 2f
+        \\ldr h0, [x11]
+        \\fcvt s0, h0
+        \\ldr q1, [x11, #2]
+        // Split nibbles
+        \\and v2.16b, v1.16b, v5.16b
+        \\ushr v3.16b, v1.16b, #4
+        // Low nibbles → weights 0-15
+        \\uxtl v6.8h, v2.8b
+        \\uxtl2 v7.8h, v2.16b
+        \\sub v6.8h, v6.8h, v18.8h
+        \\sub v7.8h, v7.8h, v18.8h
+        \\sxtl v10.4s, v6.4h
+        \\sxtl2 v11.4s, v6.8h
+        \\sxtl v12.4s, v7.4h
+        \\sxtl2 v13.4s, v7.8h
+        \\scvtf v10.4s, v10.4s
+        \\scvtf v11.4s, v11.4s
+        \\scvtf v12.4s, v12.4s
+        \\scvtf v13.4s, v13.4s
+        \\ldp q20, q21, [x12]
+        \\ldp q22, q23, [x12, #32]
+        \\fmul v10.4s, v10.4s, v20.4s
+        \\fmla v10.4s, v11.4s, v21.4s
+        \\fmla v10.4s, v12.4s, v22.4s
+        \\fmla v10.4s, v13.4s, v23.4s
+        // High nibbles → weights 16-31
+        \\uxtl v6.8h, v3.8b
+        \\uxtl2 v7.8h, v3.16b
+        \\sub v6.8h, v6.8h, v18.8h
+        \\sub v7.8h, v7.8h, v18.8h
+        \\sxtl v14.4s, v6.4h
+        \\sxtl2 v15.4s, v6.8h
+        \\sxtl v16.4s, v7.4h
+        \\sxtl2 v17.4s, v7.8h
+        \\scvtf v14.4s, v14.4s
+        \\scvtf v15.4s, v15.4s
+        \\scvtf v16.4s, v16.4s
+        \\scvtf v17.4s, v17.4s
+        \\ldp q24, q25, [x12, #64]
+        \\ldp q26, q27, [x12, #96]
+        \\fmla v10.4s, v14.4s, v24.4s
+        \\fmla v10.4s, v15.4s, v25.4s
+        \\fmla v10.4s, v16.4s, v26.4s
+        \\fmla v10.4s, v17.4s, v27.4s
+        \\faddp v10.4s, v10.4s, v10.4s
+        \\faddp v10.2s, v10.2s, v10.2s
+        \\fmul s10, s10, s0
+        \\fadd s30, s30, s10
+        \\add x11, x11, #18
+        \\add x12, x12, #128
+        \\sub x13, x13, #1
+        \\b 1b
+        \\2:
+        \\fmov w8, s30
+        : [out] "={w8}" (result),
+        : [raw] "{x0}" (raw_row.ptr),
+          [x] "{x1}" (x.ptr),
+          [nb] "{x2}" (n_blocks),
+        : "v0","v1","v2","v3","v5","v6","v7","v10","v11","v12","v13","v14","v15","v16","v17","v18","v20","v21","v22","v23","v24","v25","v26","v27","v30","w6","w7","memory"
+    );
+
+    return result;
+}
+
 /// Multithreaded quantized matmul dispatcher with NEON Q5_0.
 pub fn matmulQuantizedNeon(
     raw_weights: []const u8,

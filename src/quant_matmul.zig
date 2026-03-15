@@ -409,15 +409,13 @@ fn dotQ5_0_lazy(row_data: []const u8, x: []const f32, n_cols: usize) f32 {
 /// Compute a single row's dot product based on tensor type.
 /// Uses lazy dequant + SIMD for Q5_0 (best of both worlds).
 pub fn dotQuantizedRow(row_data: []const u8, x: []const f32, n_cols: usize, tensor_type: u32) f32 {
+    const use_neon = @import("builtin").cpu.arch == .aarch64;
     return switch (tensor_type) {
-        2 => dotQ4_0(row_data, x, n_cols),
-        6 => if (@import("builtin").cpu.arch == .aarch64)
-            @import("neon.zig").dotQ5_0Neon(row_data, x, n_cols)
-        else
-            dotQ5_0_lazy(row_data, x, n_cols),
-        8 => dotQ8_0(row_data, x, n_cols),
-        12 => dotQ4_K(row_data, x, n_cols),
-        14 => dotQ6_K(row_data, x, n_cols),
+        2 => if (use_neon) @import("neon.zig").dotQ4_0Neon(row_data, x, n_cols) else dotQ4_0(row_data, x, n_cols),
+        6 => if (use_neon) @import("neon.zig").dotQ5_0Neon(row_data, x, n_cols) else dotQ5_0_lazy(row_data, x, n_cols),
+        8 => if (use_neon) @import("neon.zig").dotQ8_0Neon(row_data, x, n_cols) else dotQ8_0(row_data, x, n_cols),
+        12 => dotQ4_K(row_data, x, n_cols), // Complex format, scalar for now
+        14 => dotQ6_K(row_data, x, n_cols), // Complex format, scalar for now
         else => blk: {
             var sum: f32 = 0;
             const f32_row: [*]const f32 = @ptrCast(@alignCast(row_data.ptr));
