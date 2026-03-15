@@ -331,11 +331,87 @@ pub fn dotQ4_K(raw_row: []const u8, x: []const f32, n: usize) f32 {
 
 // ── Dispatch ─────────────────────────────────────────────────────
 
+/// Fast SIMD dot product on f32 data (same as llama2.zig dotRow).
+fn simdDot(a: []const f32, b: []const f32, n: usize) f32 {
+    const V = 4;
+    var a0: @Vector(V, f32) = @splat(0);
+    var a1: @Vector(V, f32) = @splat(0);
+    var a2: @Vector(V, f32) = @splat(0);
+    var a3: @Vector(V, f32) = @splat(0);
+    var a4: @Vector(V, f32) = @splat(0);
+    var a5: @Vector(V, f32) = @splat(0);
+    var a6: @Vector(V, f32) = @splat(0);
+    var a7: @Vector(V, f32) = @splat(0);
+    var j: usize = 0;
+    while (j + 32 <= n) : (j += 32) {
+        a0 += @as(@Vector(V, f32), a[j..][0..4].*) * @as(@Vector(V, f32), b[j..][0..4].*);
+        a1 += @as(@Vector(V, f32), a[j + 4 ..][0..4].*) * @as(@Vector(V, f32), b[j + 4 ..][0..4].*);
+        a2 += @as(@Vector(V, f32), a[j + 8 ..][0..4].*) * @as(@Vector(V, f32), b[j + 8 ..][0..4].*);
+        a3 += @as(@Vector(V, f32), a[j + 12 ..][0..4].*) * @as(@Vector(V, f32), b[j + 12 ..][0..4].*);
+        a4 += @as(@Vector(V, f32), a[j + 16 ..][0..4].*) * @as(@Vector(V, f32), b[j + 16 ..][0..4].*);
+        a5 += @as(@Vector(V, f32), a[j + 20 ..][0..4].*) * @as(@Vector(V, f32), b[j + 20 ..][0..4].*);
+        a6 += @as(@Vector(V, f32), a[j + 24 ..][0..4].*) * @as(@Vector(V, f32), b[j + 24 ..][0..4].*);
+        a7 += @as(@Vector(V, f32), a[j + 28 ..][0..4].*) * @as(@Vector(V, f32), b[j + 28 ..][0..4].*);
+    }
+    var sum = @reduce(.Add, (a0 + a1) + (a2 + a3) + (a4 + a5) + (a6 + a7));
+    while (j + V <= n) : (j += V) {
+        sum += @reduce(.Add, @as(@Vector(V, f32), a[j..][0..V].*) * @as(@Vector(V, f32), b[j..][0..V].*));
+    }
+    while (j < n) : (j += 1) sum += a[j] * b[j];
+    return sum;
+}
+
+/// Lazy dequant Q5_0: dequant to L1-resident stack buffer, then SIMD dot.
+/// Uses vectorized high-bit extraction: process 8 bits per qh byte simultaneously.
+fn dotQ5_0_lazy(row_data: []const u8, x: []const f32, n_cols: usize) f32 {
+    const BS: usize = 32;
+    const BB: usize = 22;
+
+    // Stack buffer — fits in L1 cache (576 floats = 2.3KB)
+    var buf: [8192]f32 = undefined;
+
+    var block_idx: usize = 0;
+    while (block_idx * BS < n_cols) : (block_idx += 1) {
+        const block = row_data[block_idx * BB ..][0..BB];
+        const d = f16ToF32(readU16LE(block, 0));
+        const qh = readU32LE(block, 2);
+        const out = buf[block_idx * BS ..];
+
+        // Vectorized high-bit extraction: process all 32 bits of qh
+        // by splitting into 4 bytes and extracting 8 bits per byte
+        const qh_b: [4]u8 = @bitCast(qh);
+
+        // Weights 0-7: low nibbles + bits 0-7 of qh
+        inline for (0..8) |j| {
+            const hi: u8 = ((qh_b[0] >> @as(u3, @intCast(j))) & 1) << 4;
+            out[j] = d * @as(f32, @floatFromInt(@as(i16, (block[6 + j] & 0xF) | hi) - 16));
+        }
+        // Weights 8-15: low nibbles + bits 8-15 of qh
+        inline for (0..8) |j| {
+            const hi: u8 = ((qh_b[1] >> @as(u3, @intCast(j))) & 1) << 4;
+            out[8 + j] = d * @as(f32, @floatFromInt(@as(i16, (block[6 + 8 + j] & 0xF) | hi) - 16));
+        }
+        // Weights 16-23: high nibbles + bits 16-23 of qh
+        inline for (0..8) |j| {
+            const hi: u8 = ((qh_b[2] >> @as(u3, @intCast(j))) & 1) << 4;
+            out[16 + j] = d * @as(f32, @floatFromInt(@as(i16, (block[6 + j] >> 4) | hi) - 16));
+        }
+        // Weights 24-31: high nibbles + bits 24-31 of qh
+        inline for (0..8) |j| {
+            const hi: u8 = ((qh_b[3] >> @as(u3, @intCast(j))) & 1) << 4;
+            out[24 + j] = d * @as(f32, @floatFromInt(@as(i16, (block[6 + 8 + j] >> 4) | hi) - 16));
+        }
+    }
+
+    return simdDot(buf[0..n_cols], x, n_cols);
+}
+
 /// Compute a single row's dot product based on tensor type.
+/// Uses lazy dequant + SIMD for Q5_0 (best of both worlds).
 pub fn dotQuantizedRow(row_data: []const u8, x: []const f32, n_cols: usize, tensor_type: u32) f32 {
     return switch (tensor_type) {
         2 => dotQ4_0(row_data, x, n_cols),
-        6 => dotQ5_0(row_data, x, n_cols),
+        6 => dotQ5_0_lazy(row_data, x, n_cols),
         8 => dotQ8_0(row_data, x, n_cols),
         12 => dotQ4_K(row_data, x, n_cols),
         14 => dotQ6_K(row_data, x, n_cols),
