@@ -99,11 +99,17 @@ fn runGGUF(
         }
     }
 
+    const qw = model.quantizedWeights(allocator) catch null;
+
     var pos: u32 = 0;
     var actual_tokens: u32 = 0;
 
     while (pos < max_tokens and pos < model.config.seq_len) {
-        llama2.forward(model.config, &model.weights, &state, token, pos);
+        if (qw) |*q| {
+            llama2.forwardQuantized(model.config, &model.weights, q, &state, token, pos);
+        } else {
+            llama2.forward(model.config, &model.weights, &state, token, pos);
+        }
 
         token = llama2.sample(state.logits, temperature, &rng);
 
