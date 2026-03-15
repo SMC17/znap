@@ -228,18 +228,20 @@ fn matmul(out: []f32, x: []const f32, w: []const f32, n: usize) void {
 }
 
 /// Quantized weight storage — raw bytes + metadata for native quantized matmul.
-pub const QuantizedLayer = struct {
-    raw_wq: []const u8,
-    raw_wk: []const u8,
-    raw_wv: []const u8,
-    raw_wo: []const u8,
-    raw_w1: []const u8,
-    raw_w2: []const u8,
-    raw_w3: []const u8,
+pub const QuantizedTensor = struct {
+    raw: []const u8,
     tensor_type: u32,
-    n_cols_attn: usize, // dim for attn weights
-    n_cols_ffn: usize, // dim for ffn weights (w1, w3 input)
-    n_cols_ffn_down: usize, // hidden_dim for w2 input
+    n_cols: usize,
+};
+
+pub const QuantizedLayer = struct {
+    wq: QuantizedTensor,
+    wk: QuantizedTensor,
+    wv: QuantizedTensor,
+    wo: QuantizedTensor,
+    w1: QuantizedTensor,
+    w2: QuantizedTensor,
+    w3: QuantizedTensor,
 };
 
 pub const QuantizedWeights = struct {
@@ -404,9 +406,9 @@ pub fn forwardQuantized(
         rmsNorm(state.xb, state.x, weights.rms_att_weight[l * dim .. (l + 1) * dim]);
 
         // QKV projections — NATIVE QUANTIZED (the main speedup)
-        matmulRaw(state.q, state.xb, ql.raw_wq, ql.n_cols_attn, ql.tensor_type);
-        matmulRaw(state.k, state.xb, ql.raw_wk, ql.n_cols_attn, ql.tensor_type);
-        matmulRaw(state.v, state.xb, ql.raw_wv, ql.n_cols_attn, ql.tensor_type);
+        matmulRaw(state.q, state.xb, ql.wq.raw, ql.wq.n_cols, ql.wq.tensor_type);
+        matmulRaw(state.k, state.xb, ql.wk.raw, ql.wk.n_cols, ql.wk.tensor_type);
+        matmulRaw(state.v, state.xb, ql.wv.raw, ql.wv.n_cols, ql.wv.tensor_type);
 
         // RoPE (same as f32 path)
         for (0..n_heads) |h| {
@@ -467,20 +469,20 @@ pub fn forwardQuantized(
         }
 
         // Output projection — NATIVE QUANTIZED
-        matmulRaw(state.xb2, state.xb, ql.raw_wo, ql.n_cols_attn, ql.tensor_type);
+        matmulRaw(state.xb2, state.xb, ql.wo.raw, ql.wo.n_cols, ql.wo.tensor_type);
         for (0..dim) |i| state.x[i] += state.xb2[i];
 
         // FFN
         rmsNorm(state.xb, state.x, weights.rms_ffn_weight[l * dim .. (l + 1) * dim]);
-        matmulRaw(state.hb, state.xb, ql.raw_w1, ql.n_cols_ffn, ql.tensor_type);
-        matmulRaw(state.hb2, state.xb, ql.raw_w3, ql.n_cols_ffn, ql.tensor_type);
+        matmulRaw(state.hb, state.xb, ql.w1.raw, ql.w1.n_cols, ql.w1.tensor_type);
+        matmulRaw(state.hb2, state.xb, ql.w3.raw, ql.w3.n_cols, ql.w3.tensor_type);
 
         // SwiGLU
         for (0..hidden_dim) |i| {
             state.hb[i] = state.hb[i] * (1.0 / (1.0 + @exp(-state.hb[i]))) * state.hb2[i];
         }
 
-        matmulRaw(state.xb, state.hb, ql.raw_w2, ql.n_cols_ffn_down, ql.tensor_type);
+        matmulRaw(state.xb, state.hb, ql.w2.raw, ql.w2.n_cols, ql.w2.tensor_type);
         for (0..dim) |i| state.x[i] += state.xb[i];
     }
 
@@ -962,13 +964,17 @@ pub const GGUFModel = struct {
         }
     }
 
-    /// Get raw tensor data from the GGUF file by name.
-    fn getRawTensor(gf: *const gguf_mod.GGUFFile, name: []const u8) ?[]const u8 {
+    /// Get raw tensor data + metadata from the GGUF file by name.
+    fn getQuantizedTensor(gf: *const gguf_mod.GGUFFile, name: []const u8) ?QuantizedTensor {
         const info = gf.getTensorInfo(name) orelse return null;
         const raw_bytes = (info.numElements() / info.tensor_type.blockSize()) * info.tensor_type.bytesPerBlock();
         const data_start = gf.data_offset + info.offset;
         if (data_start + raw_bytes > gf.file_data.len) return null;
-        return gf.file_data[data_start .. data_start + raw_bytes];
+        return .{
+            .raw = gf.file_data[data_start .. data_start + raw_bytes],
+            .tensor_type = @intFromEnum(info.tensor_type),
+            .n_cols = @intCast(info.dims[0]), // GGUF dims[0] = columns (in_features)
+        };
     }
 
     /// Build QuantizedWeights for native quantized forward pass.
@@ -976,13 +982,10 @@ pub const GGUFModel = struct {
         const gf = &(self.gguf_file orelse return null);
 
         const n_layers = self.config.n_layers;
-        const dim = self.config.dim;
-        const hidden_dim = self.config.hidden_dim;
 
         var layers = try allocator.alloc(QuantizedLayer, n_layers);
 
         for (0..n_layers) |l| {
-            // Build tensor names with separate buffers
             var buf_wq: [64]u8 = undefined;
             var buf_wk: [64]u8 = undefined;
             var buf_wv: [64]u8 = undefined;
@@ -991,35 +994,24 @@ pub const GGUFModel = struct {
             var buf_w2: [64]u8 = undefined;
             var buf_w3: [64]u8 = undefined;
 
-            const name_wq = try std.fmt.bufPrint(&buf_wq, "blk.{d}.attn_q.weight", .{l});
-            const name_wk = try std.fmt.bufPrint(&buf_wk, "blk.{d}.attn_k.weight", .{l});
-            const name_wv = try std.fmt.bufPrint(&buf_wv, "blk.{d}.attn_v.weight", .{l});
-            const name_wo = try std.fmt.bufPrint(&buf_wo, "blk.{d}.attn_output.weight", .{l});
-            const name_w1 = try std.fmt.bufPrint(&buf_w1, "blk.{d}.ffn_gate.weight", .{l});
-            const name_w2 = try std.fmt.bufPrint(&buf_w2, "blk.{d}.ffn_down.weight", .{l});
-            const name_w3 = try std.fmt.bufPrint(&buf_w3, "blk.{d}.ffn_up.weight", .{l});
-
-            const wq_info = gf.getTensorInfo(name_wq) orelse return null;
-
             layers[l] = .{
-                .raw_wq = getRawTensor(gf, name_wq) orelse return null,
-                .raw_wk = getRawTensor(gf, name_wk) orelse return null,
-                .raw_wv = getRawTensor(gf, name_wv) orelse return null,
-                .raw_wo = getRawTensor(gf, name_wo) orelse return null,
-                .raw_w1 = getRawTensor(gf, name_w1) orelse return null,
-                .raw_w2 = getRawTensor(gf, name_w2) orelse return null,
-                .raw_w3 = getRawTensor(gf, name_w3) orelse return null,
-                .tensor_type = @intFromEnum(wq_info.tensor_type),
-                .n_cols_attn = dim,
-                .n_cols_ffn = dim,
-                .n_cols_ffn_down = hidden_dim,
+                .wq = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wq, "blk.{d}.attn_q.weight", .{l})) orelse return null,
+                .wk = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wk, "blk.{d}.attn_k.weight", .{l})) orelse return null,
+                .wv = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wv, "blk.{d}.attn_v.weight", .{l})) orelse return null,
+                .wo = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wo, "blk.{d}.attn_output.weight", .{l})) orelse return null,
+                .w1 = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_w1, "blk.{d}.ffn_gate.weight", .{l})) orelse return null,
+                .w2 = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_w2, "blk.{d}.ffn_down.weight", .{l})) orelse return null,
+                .w3 = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_w3, "blk.{d}.ffn_up.weight", .{l})) orelse return null,
             };
         }
 
+        const dim = self.config.dim;
+        const wcls_qt = getQuantizedTensor(gf, "output.weight");
+
         return .{
             .layers = layers,
-            .raw_wcls = getRawTensor(gf, "output.weight"),
-            .wcls_type = if (gf.getTensorInfo("output.weight")) |i| @intFromEnum(i.tensor_type) else 0,
+            .raw_wcls = if (wcls_qt) |qt| qt.raw else null,
+            .wcls_type = if (wcls_qt) |qt| qt.tensor_type else 0,
             .wcls_cols = dim,
             .wcls_rows = @intCast(if (self.config.vocab_size < 0) -self.config.vocab_size else self.config.vocab_size),
         };

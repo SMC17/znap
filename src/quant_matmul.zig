@@ -44,9 +44,10 @@ pub fn dotQ4_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
         var sum: f32 = 0;
         for (0..16) |j| {
             const byte = block[2 + j];
+            // ggml layout: low nibble -> weight j (0..15), high nibble -> weight j+16 (16..31)
             const lo = @as(f32, @floatFromInt(@as(i8, @intCast(byte & 0xF)) - 8));
             const hi = @as(f32, @floatFromInt(@as(i8, @intCast(byte >> 4)) - 8));
-            sum += lo * xb[j * 2] + hi * xb[j * 2 + 1];
+            sum += lo * xb[j] + hi * xb[j + 16];
         }
         total += d * sum;
     }
@@ -68,26 +69,26 @@ pub fn dotQ5_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
         const qh = readU32LE(block, 2); // 32 high bits
         const xb = x[block_idx * BS ..];
 
-        var sum_qx: f32 = 0;
-        var sum_x: f32 = 0;
+        var sum: f32 = 0;
 
         for (0..16) |j| {
             const byte = block[6 + j];
             const lo_nib: u8 = byte & 0xF;
             const hi_nib: u8 = byte >> 4;
 
-            // Extract high bits
-            const qh_lo: u8 = @intCast((qh >> @intCast(j * 2)) & 1);
-            const qh_hi: u8 = @intCast((qh >> @intCast(j * 2 + 1)) & 1);
+            // Extract high bits — matches ggml exactly:
+            // bit j for low nibble (weight j), bit j+16 for high nibble (weight j+16)
+            const xh_0: u8 = @intCast((qh >> @as(u5, @intCast(j))) & 1);
+            const xh_1: u8 = @intCast((qh >> @as(u5, @intCast(j + 16))) & 1);
 
-            // 5-bit values
-            const q5_lo: f32 = @floatFromInt(@as(u8, lo_nib | (qh_lo << 4)));
-            const q5_hi: f32 = @floatFromInt(@as(u8, hi_nib | (qh_hi << 4)));
+            // 5-bit values, subtract 16 bias (same as ggml's cast-to-int8 trick)
+            const val0: f32 = @floatFromInt(@as(i8, @intCast(@as(u8, lo_nib | (xh_0 << 4)))) - @as(i8, 16));
+            const val1: f32 = @floatFromInt(@as(i8, @intCast(@as(u8, hi_nib | (xh_1 << 4)))) - @as(i8, 16));
 
-            sum_qx += q5_lo * xb[j * 2] + q5_hi * xb[j * 2 + 1];
-            sum_x += xb[j * 2] + xb[j * 2 + 1];
+            // ggml layout: low nibble -> weight j (0..15), high nibble -> weight j+16 (16..31)
+            sum += val0 * xb[j] + val1 * xb[j + 16];
         }
-        total += d * (sum_qx - 16.0 * sum_x);
+        total += d * sum;
     }
     return total;
 }
@@ -130,28 +131,44 @@ pub fn dotQ6_K(raw_row: []const u8, x: []const f32, n: usize) f32 {
         const block = raw_row[block_idx * BB ..][0..BB];
         const xb = x[block_idx * BS ..];
 
-        const ql = block[0..128]; // Low 4 bits
-        const qh = block[128..192]; // High 2 bits
+        const ql = block[0..128]; // Low 4 bits: 128 bytes
+        const qh = block[128..192]; // High 2 bits: 64 bytes
         const sc = block[192..208]; // 16 int8 scales
         const d = f16ToF32(readU16LE(block, 208));
 
-        // 16 sub-blocks of 16 weights each
-        for (0..16) |sb| {
-            const scale: f32 = @floatFromInt(@as(i8, @bitCast(sc[sb])));
-            var sum: f32 = 0;
+        // Matches dequantQ6_K in gguf.zig exactly.
+        // Half 1: weights 0..127, using ql[0..63], qh[0..31]
+        for (0..32) |l| {
+            const is: usize = l / 16;
+            const q1: i8 = @as(i8, @intCast((ql[l] & 0xF) | (((qh[l] >> 0) & 3) << 4))) - 32;
+            const q2: i8 = @as(i8, @intCast((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4))) - 32;
+            const q3: i8 = @as(i8, @intCast((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4))) - 32;
+            const q4: i8 = @as(i8, @intCast((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4))) - 32;
+            const s0: f32 = @floatFromInt(@as(i8, @bitCast(sc[is + 0])));
+            const s2: f32 = @floatFromInt(@as(i8, @bitCast(sc[is + 2])));
+            const s4: f32 = @floatFromInt(@as(i8, @bitCast(sc[is + 4])));
+            const s6: f32 = @floatFromInt(@as(i8, @bitCast(sc[is + 6])));
+            total += d * s0 * @as(f32, @floatFromInt(q1)) * xb[l + 0];
+            total += d * s2 * @as(f32, @floatFromInt(q2)) * xb[l + 32];
+            total += d * s4 * @as(f32, @floatFromInt(q3)) * xb[l + 64];
+            total += d * s6 * @as(f32, @floatFromInt(q4)) * xb[l + 96];
+        }
 
-            for (0..16) |j| {
-                const idx = sb * 16 + j;
-                const ql_byte_idx = idx / 2;
-                const ql_nibble: u8 = if (idx % 2 == 0) ql[ql_byte_idx] & 0xF else ql[ql_byte_idx] >> 4;
-                const qh_byte_idx = idx / 4;
-                const qh_shift: u3 = @intCast((idx % 4) * 2);
-                const qh_bits: u8 = @intCast((qh[qh_byte_idx] >> qh_shift) & 3);
-
-                const q6: i8 = @intCast(@as(i16, ql_nibble | (qh_bits << 4)) - 32);
-                sum += @as(f32, @floatFromInt(q6)) * xb[idx];
-            }
-            total += d * scale * sum;
+        // Half 2: weights 128..255, using ql[64..127], qh[32..63]
+        for (0..32) |l| {
+            const is: usize = l / 16;
+            const q1: i8 = @as(i8, @intCast((ql[64 + l] & 0xF) | (((qh[32 + l] >> 0) & 3) << 4))) - 32;
+            const q2: i8 = @as(i8, @intCast((ql[64 + l + 32] & 0xF) | (((qh[32 + l] >> 2) & 3) << 4))) - 32;
+            const q3: i8 = @as(i8, @intCast((ql[64 + l] >> 4) | (((qh[32 + l] >> 4) & 3) << 4))) - 32;
+            const q4: i8 = @as(i8, @intCast((ql[64 + l + 32] >> 4) | (((qh[32 + l] >> 6) & 3) << 4))) - 32;
+            const s8: f32 = @floatFromInt(@as(i8, @bitCast(sc[is + 8])));
+            const s10: f32 = @floatFromInt(@as(i8, @bitCast(sc[is + 10])));
+            const s12: f32 = @floatFromInt(@as(i8, @bitCast(sc[is + 12])));
+            const s14: f32 = @floatFromInt(@as(i8, @bitCast(sc[is + 14])));
+            total += d * s8 * @as(f32, @floatFromInt(q1)) * xb[128 + l + 0];
+            total += d * s10 * @as(f32, @floatFromInt(q2)) * xb[128 + l + 32];
+            total += d * s12 * @as(f32, @floatFromInt(q3)) * xb[128 + l + 64];
+            total += d * s14 * @as(f32, @floatFromInt(q4)) * xb[128 + l + 96];
         }
     }
     return total;
@@ -173,47 +190,72 @@ pub fn dotQ4_K(raw_row: []const u8, x: []const f32, n: usize) f32 {
 
         const d = f16ToF32(readU16LE(block, 0));
         const dmin = f16ToF32(readU16LE(block, 2));
-        const scales_raw = block[4..16];
-        const qs = block[16..144];
+        const scales_raw = block[4..16]; // 12 bytes
+        const qs = block[16..144]; // 128 bytes
 
-        // Extract 6-bit scales and mins from 12 bytes
-        // ggml packs them as: bytes 0-3 have scales[0:4] & 63 and mins[0:4] & 63
-        // bytes 4-7 have scales[4:8] & 63, bytes 8-11 have high 2 bits
-        var sc: [8]u8 = undefined;
-        var mn: [8]u8 = undefined;
+        // Decode scales and mins using ggml's utmp bit manipulation.
+        // This matches ggml_vec_dot_q4_K_q8_K_generic exactly:
+        //   scales = (uint8_t*)&utmp[0] (8 bytes, utmp[0..1])
+        //   mins   = (uint8_t*)&utmp[2] (8 bytes, utmp[2..3])
+        const kmask1: u32 = 0x3f3f3f3f;
+        const kmask2: u32 = 0x0f0f0f0f;
+        const kmask3: u32 = 0x03030303;
 
-        for (0..4) |i| {
-            sc[i] = scales_raw[i] & 63;
-            mn[i] = scales_raw[i + 4] & 63;
-        }
-        for (0..4) |i| {
-            const high_sc = (scales_raw[8 + i] >> 0) & 0x03;
-            const high_mn = (scales_raw[8 + i] >> 2) & 0x03;
-            sc[i] |= high_sc << 6;
-            mn[i] |= high_mn << 6;
+        var utmp: [4]u32 = undefined;
+        utmp[0] = readU32LE(scales_raw, 0);
+        utmp[1] = readU32LE(scales_raw, 4);
+        utmp[2] = readU32LE(scales_raw, 8);
 
-            const high_sc2 = (scales_raw[8 + i] >> 4) & 0x03;
-            const high_mn2 = (scales_raw[8 + i] >> 6) & 0x03;
-            sc[i + 4] = (scales_raw[i + 4] >> 6) | (high_sc2 << 2);
-            mn[i + 4] = (scales_raw[i] >> 6) | (high_mn2 << 2);
-        }
+        // Compute derived values before overwriting
+        const new_utmp3 = ((utmp[2] >> 4) & kmask2) | (((utmp[1] >> 6) & kmask3) << 4);
+        const uaux = utmp[1] & kmask1;
+        const new_utmp1 = (utmp[2] & kmask2) | (((utmp[0] >> 6) & kmask3) << 4);
+        utmp[0] = utmp[0] & kmask1;
+        utmp[1] = new_utmp1;
+        utmp[2] = uaux;
+        utmp[3] = new_utmp3;
 
-        // 8 sub-blocks of 32 weights
-        for (0..8) |sb| {
-            const d_sc = d * @as(f32, @floatFromInt(sc[sb]));
-            const d_mn = dmin * @as(f32, @floatFromInt(mn[sb]));
-            const data_off = sb * 16;
+        // scales[0..7] = utmp[0..1] bytes, mins[0..7] = utmp[2..3] bytes
+        const all_bytes: [16]u8 = @bitCast(utmp);
+        const scales = all_bytes[0..8];
+        const mins = all_bytes[8..16];
 
-            var sum_qx: f32 = 0;
-            var sum_x: f32 = 0;
-            for (0..16) |j| {
-                const byte = qs[data_off + j];
-                const lo: f32 = @floatFromInt(byte & 0xF);
-                const hi: f32 = @floatFromInt(byte >> 4);
-                sum_qx += lo * xb[sb * 32 + j * 2] + hi * xb[sb * 32 + j * 2 + 1];
-                sum_x += xb[sb * 32 + j * 2] + xb[sb * 32 + j * 2 + 1];
+        // ggml layout: 4 groups of 64 weights.
+        // Each group reads 32 bytes of qs. Within each group:
+        //   - first 32 weights use low nibbles (qs[0..31] & 0xF), scale[is], min[is]
+        //   - next 32 weights use high nibbles (qs[0..31] >> 4), scale[is+1], min[is+1]
+        // q pointer advances by 32 each group.
+        var q_off: usize = 0;
+        var is: usize = 0;
+        var w_off: usize = 0;
+        while (w_off < 256) : (w_off += 64) {
+            const d1 = d * @as(f32, @floatFromInt(scales[is]));
+            const m1 = dmin * @as(f32, @floatFromInt(mins[is]));
+            const d2 = d * @as(f32, @floatFromInt(scales[is + 1]));
+            const m2 = dmin * @as(f32, @floatFromInt(mins[is + 1]));
+
+            // 32 weights from low nibbles
+            var sum1: f32 = 0;
+            var sum_x1: f32 = 0;
+            for (0..32) |l| {
+                const nibble: f32 = @floatFromInt(qs[q_off + l] & 0xF);
+                sum1 += nibble * xb[w_off + l];
+                sum_x1 += xb[w_off + l];
             }
-            total += d_sc * sum_qx - d_mn * sum_x;
+            total += d1 * sum1 - m1 * sum_x1;
+
+            // 32 weights from high nibbles (same 32 bytes)
+            var sum2: f32 = 0;
+            var sum_x2: f32 = 0;
+            for (0..32) |l| {
+                const nibble: f32 = @floatFromInt(qs[q_off + l] >> 4);
+                sum2 += nibble * xb[w_off + 32 + l];
+                sum_x2 += xb[w_off + 32 + l];
+            }
+            total += d2 * sum2 - m2 * sum_x2;
+
+            q_off += 32;
+            is += 2;
         }
     }
     return total;
