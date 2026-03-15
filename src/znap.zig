@@ -31,6 +31,7 @@ pub const train = @import("train.zig");
 pub const gpu = @import("gpu.zig");
 pub const gpu_train = @import("gpu_train.zig");
 pub const llama2 = @import("llama2.zig");
+pub const gguf = @import("gguf.zig");
 
 // Re-export core types
 pub const Tensor = tensor.Tensor;
@@ -115,4 +116,5 @@ test {
     _ = train;
     _ = gpu;
     _ = gpu_train;
+    _ = gguf;
 }
