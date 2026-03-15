@@ -101,6 +101,19 @@ pub fn build(b: *std.Build) void {
     const proof_step = b.step("formal", "Formal verification + INT8 + softmax experiments");
     proof_step.dependOn(&run_proof.step);
 
+    const margin_exe = b.addExecutable(.{
+        .name = "znap-margin",
+        .root_source_file = b.path("benchmarks/margin_training.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    margin_exe.root_module.addImport("znap", lib.root_module);
+    b.installArtifact(margin_exe);
+
+    const run_margin = b.addRunArtifact(margin_exe);
+    const margin_step = b.step("margin", "Margin training → quantization robustness experiment");
+    margin_step.dependOn(&run_margin.step);
+
     // ── Examples ─────────────────────────────────────────────────
     const rl_example = b.addExecutable(.{
         .name = "rl-agent",
@@ -141,6 +154,8 @@ pub fn build(b: *std.Build) void {
         "src/weights.zig",
         "src/tokenizer.zig",
         "src/train.zig",
+        "src/gpu.zig",
+        "src/gpu_train.zig",
         "src/znap.zig",
     };
 
