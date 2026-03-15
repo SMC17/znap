@@ -114,6 +114,19 @@ pub fn build(b: *std.Build) void {
     const margin_step = b.step("margin", "Margin training → quantization robustness experiment");
     margin_step.dependOn(&run_margin.step);
 
+    const deep_exe = b.addExecutable(.{
+        .name = "znap-deep-scaling",
+        .root_source_file = b.path("benchmarks/deep_scaling.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    deep_exe.root_module.addImport("znap", lib.root_module);
+    b.installArtifact(deep_exe);
+
+    const run_deep = b.addRunArtifact(deep_exe);
+    const deep_step = b.step("deep-scaling", "Deep scaling: DQN ternary crossover from 100 to 500K params");
+    deep_step.dependOn(&run_deep.step);
+
     // ── Examples ─────────────────────────────────────────────────
     const rl_example = b.addExecutable(.{
         .name = "rl-agent",
