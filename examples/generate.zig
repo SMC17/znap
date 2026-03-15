@@ -99,10 +99,9 @@ fn runGGUF(
         }
     }
 
-    // Use f32 dequant path (faster due to SIMD f32 matmul + multithreaded vocab)
-    // Native quantized path is correct but scalar byte extraction limits throughput.
-    // The f32 path achieves 89 tok/s vs 25 tok/s native quantized.
-    // Memory trade-off: f32 uses ~4x more RAM but is 3.6x faster.
+    // Use f32 SIMD path — fastest correct path available.
+    // INT8 requantization doesn't help because the bottleneck is
+    // i8×f32 conversion, not the dot product itself.
 
     var pos: u32 = 0;
     var actual_tokens: u32 = 0;

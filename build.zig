@@ -192,6 +192,7 @@ pub fn build(b: *std.Build) void {
         "src/gpu_train.zig",
         "src/gguf.zig",
         "src/quant_matmul.zig",
+        "src/int8_matmul.zig",
         "src/znap.zig",
     };
 

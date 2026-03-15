@@ -11,6 +11,7 @@
 const std = @import("std");
 const simd = @import("simd.zig");
 const gguf_mod = @import("gguf.zig");
+const int8 = @import("int8_matmul.zig");
 
 pub const Config = struct {
     dim: u32,
@@ -374,6 +375,170 @@ pub fn forward(config: Config, weights: *const Weights, state: *RunState, token:
 
     // Classifier
     matmul(state.logits, state.x, weights.wcls, dim);
+}
+
+/// INT8 weight set — requantized from f32 for fast inference.
+pub const Int8Weights = struct {
+    wq: []u8, // [n_layers × dim × (4 + dim)]
+    wk: []u8,
+    wv: []u8,
+    wo: []u8,
+    w1: []u8,
+    w2: []u8,
+    w3: []u8,
+    wcls: []u8,
+
+    /// Requantize all weight matrices from f32 Weights to INT8.
+    pub fn fromWeights(w: *const Weights, config: Config, allocator: std.mem.Allocator) !Int8Weights {
+        const dim = config.dim;
+        const hidden_dim = config.hidden_dim;
+        const kv_dim = config.kvDim();
+        const n_layers = config.n_layers;
+        const vocab = @as(u32, @intCast(if (config.vocab_size < 0) -config.vocab_size else config.vocab_size));
+
+        return .{
+            .wq = try int8.requantizeToInt8(w.wq, n_layers * dim, dim, allocator),
+            .wk = try int8.requantizeToInt8(w.wk, n_layers * kv_dim, dim, allocator),
+            .wv = try int8.requantizeToInt8(w.wv, n_layers * kv_dim, dim, allocator),
+            .wo = try int8.requantizeToInt8(w.wo, n_layers * dim, dim, allocator),
+            .w1 = try int8.requantizeToInt8(w.w1, n_layers * hidden_dim, dim, allocator),
+            .w2 = try int8.requantizeToInt8(w.w2, n_layers * dim, hidden_dim, allocator),
+            .w3 = try int8.requantizeToInt8(w.w3, n_layers * hidden_dim, dim, allocator),
+            .wcls = try int8.requantizeToInt8(w.wcls, vocab, dim, allocator),
+        };
+    }
+
+    pub fn deinit(self: *Int8Weights, allocator: std.mem.Allocator) void {
+        allocator.free(self.wq);
+        allocator.free(self.wk);
+        allocator.free(self.wv);
+        allocator.free(self.wo);
+        allocator.free(self.w1);
+        allocator.free(self.w2);
+        allocator.free(self.w3);
+        allocator.free(self.wcls);
+    }
+};
+
+/// INT8 matmul wrapper.
+fn matmulI8(out: []f32, x: []const f32, i8_data: []const u8, n_cols: usize) void {
+    const n_rows = out.len;
+    int8.matmulInt8Threaded(i8_data, x, out, n_cols, n_rows);
+}
+
+/// Forward pass using INT8 quantized weights.
+/// Embeddings and norms are still f32. Weight matmuls use INT8.
+pub fn forwardInt8(config: Config, weights: *const Weights, i8w: *const Int8Weights, state: *RunState, token: u32, pos: u32) void {
+    const dim = config.dim;
+    const hidden_dim = config.hidden_dim;
+    const head_dim = config.headDim();
+    const kv_dim = config.kvDim();
+    const kv_mul = config.kvMul();
+    const n_heads = config.n_heads;
+    const n_layers = config.n_layers;
+    const seq_len = config.seq_len;
+
+    const i8_row_q = int8.INT8_HEADER_SIZE + dim;
+    const i8_row_kv = int8.INT8_HEADER_SIZE + dim; // K,V input is still dim
+    const i8_row_o = int8.INT8_HEADER_SIZE + dim;
+    const i8_row_w1 = int8.INT8_HEADER_SIZE + dim;
+    const i8_row_w2 = int8.INT8_HEADER_SIZE + hidden_dim;
+    const i8_row_w3 = int8.INT8_HEADER_SIZE + dim;
+
+    // Token embedding (f32)
+    const emb = weights.token_embedding[token * dim .. (token + 1) * dim];
+    @memcpy(state.x, emb);
+
+    for (0..n_layers) |l| {
+        // Attention RMSNorm (f32)
+        rmsNorm(state.xb, state.x, weights.rms_att_weight[l * dim .. (l + 1) * dim]);
+
+        // QKV — INT8 matmul
+        matmulI8(state.q, state.xb, i8w.wq[l * dim * i8_row_q ..], dim);
+        matmulI8(state.k, state.xb, i8w.wk[l * kv_dim * i8_row_kv ..], dim);
+        matmulI8(state.v, state.xb, i8w.wv[l * kv_dim * i8_row_kv ..], dim);
+
+        // RoPE (same as f32 path)
+        for (0..n_heads) |h| {
+            const q_head = state.q[h * head_dim .. (h + 1) * head_dim];
+            var i: usize = 0;
+            while (i < head_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, config.rope_freq_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                const cos_a = @cos(angle);
+                const sin_a = @sin(angle);
+                const q0 = q_head[i];
+                const q1 = q_head[i + 1];
+                q_head[i] = q0 * cos_a - q1 * sin_a;
+                q_head[i + 1] = q0 * sin_a + q1 * cos_a;
+            }
+        }
+        for (0..config.n_kv_heads) |h| {
+            const k_head = state.k[h * head_dim .. (h + 1) * head_dim];
+            var i: usize = 0;
+            while (i < head_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, config.rope_freq_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                const cos_a = @cos(angle);
+                const sin_a = @sin(angle);
+                const k0 = k_head[i];
+                const k1 = k_head[i + 1];
+                k_head[i] = k0 * cos_a - k1 * sin_a;
+                k_head[i + 1] = k0 * sin_a + k1 * cos_a;
+            }
+        }
+
+        // KV cache
+        const cache_offset = l * seq_len * kv_dim + pos * kv_dim;
+        @memcpy(state.key_cache[cache_offset .. cache_offset + kv_dim], state.k);
+        @memcpy(state.value_cache[cache_offset .. cache_offset + kv_dim], state.v);
+
+        // Attention (f32 on cached K,V)
+        for (0..n_heads) |h| {
+            const q_head = state.q[h * head_dim .. (h + 1) * head_dim];
+            const att = state.att[h * seq_len .. h * seq_len + pos + 1];
+            for (0..pos + 1) |t| {
+                const kv_h = h / kv_mul;
+                const k_offset = l * seq_len * kv_dim + t * kv_dim + kv_h * head_dim;
+                const k_vec = state.key_cache[k_offset .. k_offset + head_dim];
+                var score: f32 = 0;
+                for (0..head_dim) |d_idx| score += q_head[d_idx] * k_vec[d_idx];
+                att[t] = score / @sqrt(@as(f32, @floatFromInt(head_dim)));
+            }
+            softmax(att);
+            const xb_head = state.xb[h * head_dim .. (h + 1) * head_dim];
+            @memset(xb_head, 0);
+            for (0..pos + 1) |t| {
+                const kv_h = h / kv_mul;
+                const v_offset = l * seq_len * kv_dim + t * kv_dim + kv_h * head_dim;
+                const v_vec = state.value_cache[v_offset .. v_offset + head_dim];
+                for (0..head_dim) |d_idx| xb_head[d_idx] += att[t] * v_vec[d_idx];
+            }
+        }
+
+        // Output projection — INT8
+        matmulI8(state.xb2, state.xb, i8w.wo[l * dim * i8_row_o ..], dim);
+        for (0..dim) |i| state.x[i] += state.xb2[i];
+
+        // FFN — INT8
+        rmsNorm(state.xb, state.x, weights.rms_ffn_weight[l * dim .. (l + 1) * dim]);
+        matmulI8(state.hb, state.xb, i8w.w1[l * hidden_dim * i8_row_w1 ..], dim);
+        matmulI8(state.hb2, state.xb, i8w.w3[l * hidden_dim * i8_row_w3 ..], dim);
+
+        // SwiGLU
+        for (0..hidden_dim) |i| {
+            state.hb[i] = state.hb[i] * (1.0 / (1.0 + @exp(-state.hb[i]))) * state.hb2[i];
+        }
+
+        matmulI8(state.xb, state.hb, i8w.w2[l * dim * i8_row_w2 ..], hidden_dim);
+        for (0..dim) |i| state.x[i] += state.xb[i];
+    }
+
+    // Final RMSNorm (f32)
+    rmsNorm(state.x, state.x, weights.rms_final_weight);
+
+    // Classifier — INT8
+    matmulI8(state.logits, state.x, i8w.wcls, dim);
 }
 
 /// Forward pass using quantized weights directly (no dequantization).
