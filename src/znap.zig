@@ -1,0 +1,58 @@
+// znap — Zero-allocation Neural Acceleration Primitives
+//
+// A comptime-specialized inference engine for small neural models.
+// Sub-nanosecond policy evaluation. BitNet 1.58-bit quantized kernels.
+// No GPUs. No heap. No dependencies. Just Zig.
+//
+// Modules:
+//   tensor    — Fixed-shape tensors with comptime dimensions
+//   simd      — SIMD-accelerated vector operations (NEON/AVX)
+//   quantized — BitNet b1.58 ternary inference (integer-only inner loop)
+//   policy    — RL policy evaluation (bandit, DQN, ensemble)
+//   replay    — Zero-allocation experience replay buffer
+//   parallel  — Multi-threaded parallel inference
+
+pub const tensor = @import("tensor.zig");
+pub const simd = @import("simd.zig");
+pub const quantized = @import("quantized.zig");
+pub const policy = @import("policy.zig");
+pub const replay = @import("replay.zig");
+pub const parallel = @import("parallel.zig");
+
+// Re-export core types
+pub const Tensor = tensor.Tensor;
+pub const Vec = tensor.Vec;
+pub const matmul = tensor.matmul;
+pub const matvec = tensor.matvec;
+
+pub const TernaryMatrix = quantized.TernaryMatrix;
+pub const TernaryPolicy = quantized.TernaryPolicy;
+pub const TernaryDQN = quantized.TernaryDQN;
+
+pub const LinearPolicy = policy.LinearPolicy;
+pub const DQNPolicy = policy.DQNPolicy;
+pub const Ensemble = policy.Ensemble;
+pub const PolicyResult = policy.PolicyResult;
+pub const ActionType = policy.ActionType;
+
+pub const ReplayBuffer = replay.ReplayBuffer;
+pub const Transition = replay.Transition;
+
+pub const evaluateParallel = parallel.evaluateParallel;
+pub const ParallelResult = parallel.ParallelResult;
+
+// ── Library metadata ─────────────────────────────────────────────
+
+pub const version = "0.1.0";
+pub const version_major = 0;
+pub const version_minor = 1;
+pub const version_patch = 0;
+
+test {
+    _ = tensor;
+    _ = simd;
+    _ = quantized;
+    _ = policy;
+    _ = replay;
+    _ = parallel;
+}
