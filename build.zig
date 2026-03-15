@@ -49,6 +49,19 @@ pub fn build(b: *std.Build) void {
     const audit_step = b.step("audit", "Run honest audit with trained weights");
     audit_step.dependOn(&run_audit.step);
 
+    const scaling_exe = b.addExecutable(.{
+        .name = "znap-scaling",
+        .root_source_file = b.path("benchmarks/scaling.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    scaling_exe.root_module.addImport("znap", lib.root_module);
+    b.installArtifact(scaling_exe);
+
+    const run_scaling = b.addRunArtifact(scaling_exe);
+    const scaling_step = b.step("scaling", "Run scaling law experiment across 7 model sizes");
+    scaling_step.dependOn(&run_scaling.step);
+
     // ── Examples ─────────────────────────────────────────────────
     const rl_example = b.addExecutable(.{
         .name = "rl-agent",
