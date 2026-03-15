@@ -99,8 +99,9 @@ fn runGGUF(
         }
     }
 
-    // TODO: native quantized forward pass (Q4_K kernel needs ggml-exact nibble ordering)
-    // For now, use the dequantized f32 path which produces correct output.
+    // Use dequantized f32 matmul (correct output, SIMD-accelerated)
+    // Native quantized kernels are available in quant_matmul.zig but
+    // Q4_K scale byte unpacking needs more work to match ggml exactly.
 
     var pos: u32 = 0;
     var actual_tokens: u32 = 0;
