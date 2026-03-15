@@ -20,6 +20,10 @@ pub const replay = @import("replay.zig");
 pub const parallel = @import("parallel.zig");
 pub const attention = @import("attention.zig");
 pub const transformer = @import("transformer.zig");
+pub const mla = @import("mla.zig");
+pub const moe = @import("moe.zig");
+pub const speculative = @import("speculative.zig");
+pub const gqa = @import("gqa.zig");
 pub const weights = @import("weights.zig");
 pub const tokenizer = @import("tokenizer.zig");
 pub const train = @import("train.zig");
@@ -61,6 +65,21 @@ pub const applyRoPE = attention.applyRoPE;
 pub const topKSample = attention.topKSample;
 pub const greedySample = attention.greedySample;
 
+// Multi-Head Latent Attention (DeepSeek-V3)
+pub const MultiHeadLatentAttention = mla.MultiHeadLatentAttention;
+pub const LatentKVCache = mla.LatentKVCache;
+
+// Mixture of Experts (DeepSeek-style)
+pub const MoELayer = moe.MoELayer;
+pub const MoEExpert = moe.Expert;
+
+// Speculative Decoding
+pub const SpeculativeDecoder = speculative.SpeculativeDecoder;
+
+// Group-Query Attention + Sliding Window (Qwen-style)
+pub const GroupQueryAttention = gqa.GroupQueryAttention;
+pub const GQAKVCache = gqa.GQAKVCache;
+
 // Weights I/O
 pub const loadLinearPolicy = weights.loadLinearPolicy;
 pub const loadDQNPolicy = weights.loadDQNPolicy;
@@ -85,6 +104,10 @@ test {
     _ = parallel;
     _ = attention;
     _ = transformer;
+    _ = mla;
+    _ = moe;
+    _ = speculative;
+    _ = gqa;
     _ = weights;
     _ = tokenizer;
     _ = train;
