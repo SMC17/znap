@@ -184,6 +184,7 @@ pub fn build(b: *std.Build) void {
         "src/moe.zig",
         "src/speculative.zig",
         "src/gqa.zig",
+        "src/ssm.zig",
         "src/weights.zig",
         "src/tokenizer.zig",
         "src/train.zig",
