@@ -24,6 +24,7 @@ pub const mla = @import("mla.zig");
 pub const moe = @import("moe.zig");
 pub const speculative = @import("speculative.zig");
 pub const gqa = @import("gqa.zig");
+pub const ssm = @import("ssm.zig");
 pub const weights = @import("weights.zig");
 pub const tokenizer = @import("tokenizer.zig");
 pub const train = @import("train.zig");
@@ -108,6 +109,7 @@ test {
     _ = moe;
     _ = speculative;
     _ = gqa;
+    _ = ssm;
     _ = weights;
     _ = tokenizer;
     _ = train;
