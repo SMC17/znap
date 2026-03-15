@@ -88,6 +88,19 @@ pub fn build(b: *std.Build) void {
     const qat_step = b.step("qat", "Quantization-aware training experiment");
     qat_step.dependOn(&run_qat.step);
 
+    const proof_exe = b.addExecutable(.{
+        .name = "znap-formal",
+        .root_source_file = b.path("benchmarks/formal_proof.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    proof_exe.root_module.addImport("znap", lib.root_module);
+    b.installArtifact(proof_exe);
+
+    const run_proof = b.addRunArtifact(proof_exe);
+    const proof_step = b.step("formal", "Formal verification + INT8 + softmax experiments");
+    proof_step.dependOn(&run_proof.step);
+
     // ── Examples ─────────────────────────────────────────────────
     const rl_example = b.addExecutable(.{
         .name = "rl-agent",
