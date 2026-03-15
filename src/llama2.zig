@@ -127,14 +127,45 @@ fn softmax(x: []f32) void {
     for (x) |*v| v.* /= sum;
 }
 
-// ── Matrix-Vector Multiply ───────────────────────────────────────
+// ── Matrix-Vector Multiply (SIMD-accelerated) ────────────────────
 
 fn matmul(out: []f32, x: []const f32, w: []const f32, n: usize) void {
     const d = out.len;
+    const VEC_SIZE = 4; // NEON: 4 × f32
+
     for (0..d) |i| {
-        var sum: f32 = 0;
-        const row = w[i * n .. (i + 1) * n];
-        for (0..n) |j| sum += row[j] * x[j];
+        const row = w[i * n ..][0..n];
+
+        // 4-way unrolled SIMD accumulation
+        var acc0: @Vector(VEC_SIZE, f32) = @splat(0);
+        var acc1: @Vector(VEC_SIZE, f32) = @splat(0);
+        var acc2: @Vector(VEC_SIZE, f32) = @splat(0);
+        var acc3: @Vector(VEC_SIZE, f32) = @splat(0);
+        var j: usize = 0;
+
+        // Main loop: 16 elements per iteration (4 vectors × 4 floats)
+        while (j + 16 <= n) : (j += 16) {
+            acc0 += @as(@Vector(VEC_SIZE, f32), row[j..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j..][0..4].*);
+            acc1 += @as(@Vector(VEC_SIZE, f32), row[j + 4 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 4 ..][0..4].*);
+            acc2 += @as(@Vector(VEC_SIZE, f32), row[j + 8 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 8 ..][0..4].*);
+            acc3 += @as(@Vector(VEC_SIZE, f32), row[j + 12 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 12 ..][0..4].*);
+        }
+
+        // Reduce 4 accumulators
+        var sum = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
+
+        // Handle remaining elements with single vector
+        while (j + VEC_SIZE <= n) : (j += VEC_SIZE) {
+            const rv: @Vector(VEC_SIZE, f32) = row[j..][0..VEC_SIZE].*;
+            const xv: @Vector(VEC_SIZE, f32) = x[j..][0..VEC_SIZE].*;
+            sum += @reduce(.Add, rv * xv);
+        }
+
+        // Scalar remainder
+        while (j < n) : (j += 1) {
+            sum += row[j] * x[j];
+        }
+
         out[i] = sum;
     }
 }
