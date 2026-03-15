@@ -2,238 +2,147 @@
 
 **Zero-allocation Neural Acceleration Primitives**
 
-Sub-nanosecond inference for small neural models. BitNet b1.58 quantized kernels. SIMD-accelerated. No GPUs. No heap. No dependencies. Just Zig.
+A neural inference engine written in Zig. Loads pretrained models. Generates text. No Python. No PyTorch. No dependencies.
 
 ```
-SIMD dot product (30-dim):       < 1 ns     3.2 billion ops/sec
-Linear policy (30→6):             30 ns      33 million evals/sec
-DQN 2-layer (30→64→6):          191 ns       5.2 million evals/sec
-BitNet DQN (ternary, int-only):    2 ns     587 million evals/sec
-7-agent ensemble:                220 ns       4.6 million evals/sec
+$ zig build run -- models/stories15M.bin -t 0.9
+
+ Once upon a time, there was a little bird who loved to fly in the sky.
+ She flew everywhere she went, and the wind was so strong that it made
+ the bird feel weak. One day, she met a wise old owl who told her about
+ the importance of using her wings to fly...
+
+ 128 tokens in 1201ms (106.6 tok/s)
 ```
-
-*Benchmarked on Apple M1. Your Threadripper will be faster.*
-
-## Why
-
-Most inference engines optimize for large language models on GPUs. znap optimizes for the other end of the spectrum: **small models (<10K params) that need to run at hardware speed on CPUs.**
-
-Use cases:
-- **Reinforcement learning** — policy evaluation in real-time control loops
-- **Multi-agent systems** — evaluate dozens of agents per tick
-- **Edge inference** — sub-microsecond decisions on embedded hardware
-- **Game AI** — thousands of NPC evaluations per frame
-- **Robotics** — control policies at >1MHz update rates
-
-If your model fits in L1 cache and your latency budget is measured in nanoseconds, znap is for you.
-
-## Architecture
-
-znap exploits three properties of small-model inference that large-model frameworks ignore:
-
-### 1. Comptime Specialization
-
-Every tensor dimension is a compile-time parameter. The compiler generates a unique, unrolled kernel for each shape. No runtime dispatch. No shape checking. No virtual calls.
-
-```zig
-const znap = @import("znap");
-
-// Compile-time specialized: 30 features → 6 actions
-const Policy = znap.LinearPolicy(30, 6);
-var policy = Policy.init();
-const result = policy.evaluate(&features);
-// result.action, result.confidence, result.probabilities
-```
-
-The compiler knows `30` and `6` at compile time and generates optimal SIMD-unrolled code for exactly that shape.
-
-### 2. Zero Allocation
-
-The entire inference path — feature vectors, weight matrices, activations, softmax, argmax — runs on the stack. No heap. No allocator. No GC pause. No `malloc` in the hot loop. Ever.
-
-```zig
-// This struct is entirely stack-allocated
-const DQN = znap.DQNPolicy(30, 64, 6);  // 2,374 params, all on stack
-const dqn = DQN.initXavier(42);
-const result = dqn.evaluate(&features);  // zero allocations
-```
-
-### 3. BitNet b1.58 Quantization
-
-Weights constrained to {-1, 0, +1}. The inner loop of matrix-vector multiply becomes:
-
-```
-for each weight w:
-    if w == +1:  sum += input[j]
-    if w == -1:  sum -= input[j]
-    if w ==  0:  skip
-```
-
-**No floating-point multiplication in the inner loop.** Just integer addition and subtraction. One f32 multiply per row (scale factor) at the end.
-
-Reference: [The Era of 1-bit LLMs](https://arxiv.org/abs/2402.17764) (Ma et al., 2024)
-
-```zig
-const Ternary = znap.TernaryPolicy(30, 6);
-
-// Quantize a trained float policy
-const quantized = Ternary.fromFloat(&trained_policy);
-
-// Integer-only inference — 89x faster than float on ARM NEON
-const result = quantized.evaluate(&features);
-```
-
-At >3B params, BitNet matches full-precision perplexity. At small scales (<10K params), we observe minor quality degradation with 5-10x compression and up to 89x inference speedup.
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/SMC17/znap.git
 cd znap
-zig build test     # Run 147 tests
-zig build bench    # Run benchmarks
-zig build example  # Train an RL agent, quantize, compare
+
+# Download a pretrained model (~58MB)
+mkdir -p models
+curl -L -o models/stories15M.bin https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin
+curl -L -o models/tokenizer.bin https://github.com/karpathy/llama2.c/raw/master/tokenizer.bin
+
+# Generate text
+zig build run -- models/stories15M.bin
+
+# Run benchmarks
+zig build bench
+
+# Run all 395 tests
+zig build test
 ```
 
 Requires Zig 0.14+. No other dependencies.
 
-## Modules
+## Performance
+
+Small-model inference, benchmarked on Apple M1:
+
+```
+SIMD dot product (30-dim):       < 1 ns      3.2 billion ops/s
+Linear policy (30→6):             31 ns       33 million evals/s
+DQN 2-layer (30→64→6):          194 ns        5.2 million evals/s
+7-agent ensemble:                222 ns        4.6 million evals/s
+```
+
+Compared to equivalent operations in Python:
+
+| Operation | NumPy | PyTorch | znap | Speedup |
+|-----------|-------|---------|------|---------|
+| Linear 30→6 | 4.28 μs | 3.32 μs | **0.031 μs** | 138× |
+| DQN 30→64→6 | 6.38 μs | 6.69 μs | **0.194 μs** | 34× |
+| 7-agent ensemble | 29.5 μs | 21.3 μs | **0.222 μs** | 96× |
+
+Text generation with pretrained stories15M (6 layers, 288 dim, 6 heads):
+- **110 tokens/sec** on Apple M1 CPU
+- Zero dependencies, single binary
+
+## What's Inside
 
 | Module | What it does |
 |--------|-------------|
-| `tensor` | Fixed-shape comptime tensors, element-wise ops, activations |
-| `simd` | NEON/AVX-accelerated dot product, softmax, ReLU, argmax |
-| `quantized` | BitNet b1.58 ternary inference, integer-only matvec |
-| `policy` | Generic RL policies: linear (bandit), DQN, ensemble |
-| `replay` | Zero-allocation experience replay buffer (ring buffer) |
-| `parallel` | Multi-threaded parallel policy evaluation |
+| `llama2` | Load and run pretrained LLaMA-architecture models |
+| `tensor` | Fixed-shape comptime tensors, SIMD-accelerated ops |
+| `simd` | NEON/AVX vector operations (dot, softmax, relu) |
+| `quantized` | BitNet b1.58 ternary inference (integer-only inner loop) |
+| `policy` | RL policies: linear, DQN, ensemble |
+| `attention` | Multi-head attention, RoPE, KV cache, sampling |
+| `transformer` | Decoder-only transformer, SwiGLU MLP |
+| `gpu` | Hardware abstraction (CUDA, Metal, CPU backends) |
+| `gpu_train` | Backprop training loop with margin regularization |
+| `weights` | Binary weight format, load/save |
+| `tokenizer` | Byte-level BPE tokenizer |
+| `train` | Gradient-free training (bandit, evolution, CEM) |
+| `replay` | Zero-allocation experience replay buffer |
+| `parallel` | Multi-threaded parallel evaluation |
 
-## API
+## Research
 
-### Tensor
+znap includes 10 benchmark experiments that produced a novel research finding:
 
-```zig
-const T = znap.Tensor(4, 8);          // 4×8 matrix, all comptime
-var t = T.fromFlat(.{1,2,3,...,32});
-t.relu();                              // In-place ReLU
-t.softmax();                           // In-place softmax per row
-const s = t.sum();                     // Scalar reduction
-const idx = t.argmax();                // Index of max element
+**[Lossless Compression of Neural Policies](paper/inverse_scaling.md)** — We show that linear RL policies can be compressed 8-14× to ternary weights with **zero quality loss** (100% action agreement, KL divergence = 0.0). For DQN policies, INT8 maintains >91% agreement at all scales. Results validated on three backends (Zig SIMD, PyTorch CPU, PyTorch Metal GPU).
 
-// Matrix-vector multiply (the hot path)
-const scores = znap.matvec(6, 30, &weights, &features);
-```
-
-### Policy
-
-```zig
-// Linear (bandit): scores = W*x + b
-const P = znap.LinearPolicy(128, 16);
-var policy = P.init();
-const result = policy.evaluate(&features);
-policy.update(&features, chosen_action, reward, learning_rate);
-
-// DQN (2-layer): hidden = ReLU(W1*x + b1), out = W2*h + b2
-const D = znap.DQNPolicy(128, 64, 16);
-var dqn = D.initXavier(42);  // Xavier initialization
-const result = dqn.evaluate(&features);
-
-// Ensemble: N independent policies
-const E = znap.Ensemble(8, 128, 16);
-var ensemble = E.init();
-const results = ensemble.evaluateAll(&features);  // [8]PolicyResult
-```
-
-### Quantized (BitNet b1.58)
-
-```zig
-// Quantize a trained policy to ternary weights
-const Q = znap.TernaryPolicy(128, 16);
-const quantized = Q.fromFloat(&trained_policy);  // {-1, 0, +1} weights
-const result = quantized.evaluate(&features);     // Integer-only inner loop
-
-// DQN quantization
-const QD = znap.TernaryDQN(128, 64, 16);
-const qdqn = QD.fromFloat(&trained_dqn);
-```
-
-### Replay Buffer
-
-```zig
-// Zero-allocation ring buffer, comptime capacity
-var buf = znap.ReplayBuffer(100_000, 64).init();  // 100K transitions, 64-dim state
-buf.record(state, action, reward, next_state, done, tick);
-
-const t = buf.samplePrioritized(&rng);  // Priority-weighted sampling
-const batch = buf.sampleBatch(32, &rng); // Batch of 32
-
-buf.avgReward();    // Statistics
-buf.fillRate();     // How full is the buffer
-```
-
-### C FFI
-
-znap compiles to a static library with C ABI exports. Call from Rust, Go, Python, C++:
+Run the experiments yourself:
 
 ```bash
-zig build                  # Produces libznap.a
+zig build scaling        # Scaling law across 7 model sizes
+zig build formal         # Formal verification of lossless compression
+zig build deep-scaling   # DQN scaling to 75K params
+zig build audit          # Honest benchmarks with trained weights
+python3 benchmarks/scale_pytorch.py --device mps  # GPU-scale experiments
+```
+
+## Architecture
+
+znap exploits three properties unique to Zig:
+
+**Comptime Specialization.** Every tensor dimension is a compile-time parameter. The compiler generates a unique, SIMD-unrolled kernel for each shape. No runtime dispatch.
+
+```zig
+const znap = @import("znap");
+const Policy = znap.LinearPolicy(30, 6);  // specialized at compile time
+var policy = Policy.init();
+const result = policy.evaluate(&features); // 31 nanoseconds
+```
+
+**Zero Allocation.** The entire inference hot path runs on the stack. No allocator, no GC, no `malloc` in the inner loop.
+
+**BitNet b1.58.** Ternary weight matrices ({-1, 0, +1}) use integer addition instead of floating-point multiplication. 8× memory compression for linear policies with zero quality loss.
+
+```zig
+const Q = znap.TernaryPolicy(30, 6);
+const compressed = Q.fromFloat(&trained_policy);  // 744 → 93 bytes
+const result = compressed.evaluate(&features);     // same action, 8× smaller
 ```
 
 ## Benchmarks
 
-All measurements on Apple M1 (aarch64), ReleaseFast, single thread, 1M iterations with warmup:
-
-| Operation | Latency | Throughput | vs PyTorch* |
-|-----------|---------|------------|-------------|
-| Dot product (30-dim) | <1 ns | 3.2B ops/s | — |
-| Softmax (6-dim) | <1 ns | 2.6B ops/s | — |
-| ReLU (64-dim) | 3 ns | 301M ops/s | — |
-| Linear 30→6 | 30 ns | 33M ops/s | ~2,000x |
-| DQN 30→64→6 (f32) | 191 ns | 5.2M ops/s | ~500x |
-| DQN 30→64→6 (ternary) | 2 ns | 587M ops/s | ~50,000x |
-| 7-agent ensemble | 220 ns | 4.6M ops/s | ~1,000x |
-
-*\*PyTorch comparison is for equivalent model shapes on CPU (no GPU). PyTorch has significant per-call overhead from dynamic dispatch, Python GIL, and memory allocation that dominates at small model sizes.*
-
-### Memory
-
-| Representation | 30→6 Linear | 30→64→6 DQN |
-|---------------|-------------|-------------|
-| Float32 | 744 bytes | 9,496 bytes |
-| BitNet b1.58 | 93 bytes | ~856 bytes |
-| Compression | **8.0x** | **11.1x** |
-
-## Design Principles
-
-1. **No hidden allocations.** If it's not on the stack, it doesn't exist. `std.mem.Allocator` is never passed to any hot-path function.
-
-2. **Comptime over runtime.** Tensor shapes, SIMD widths, loop bounds — everything that CAN be known at compile time IS known at compile time.
-
-3. **SIMD by default.** `@Vector` built-ins compile to native SIMD (NEON on ARM, AVX on x86). No runtime feature detection.
-
-4. **No dependencies.** znap depends only on `std`. No build system plugins, no C libraries, no pkg-config.
-
-5. **Tested.** 147 tests across all modules. Every operation has at least one test. Quantization correctness is verified against float reference.
-
-## Research Context
-
-znap implements ideas from several frontier research directions:
-
-- **BitNet b1.58** (Ma et al., 2024): Ternary weight quantization with per-row absmax scaling
-- **Comptime kernel generation**: Related to TVM/Halide's schedule-based optimization, but at the language level rather than as a DSL
-- **Zero-allocation RL**: Inspired by the observation that small RL policies (<10K params) don't need the infrastructure of large-model frameworks
+```bash
+zig build bench          # Raw speed benchmarks
+zig build audit          # Honest audit with trained weights
+zig build scaling        # Scaling law experiment
+zig build formal         # Formal verification
+zig build deep-scaling   # DQN scaling curve
+zig build dqn-crossover  # Quantization crossover analysis
+zig build qat            # Quantization-aware training
+zig build margin         # Margin training experiment
+```
 
 ## Contributing
 
-Issues and PRs welcome. Areas of interest:
+Areas of interest:
 
-- [ ] 4-bit and 8-bit quantization (INT4/INT8 kernels)
-- [ ] Attention mechanism (small-scale self-attention for sequence models)
-- [ ] SSM (Mamba-style state-space model blocks)
-- [ ] Mixed-precision: ternary weights + INT8 activations
-- [ ] WASM compilation target for browser inference
-- [ ] CUDA bridge for training (GPU train → CPU/ternary deploy)
-- [ ] Model format: load weights from safetensors/GGUF
+- [ ] GGUF format loading (for HuggingFace model compatibility)
+- [ ] INT4/INT8 quantized inference kernels
+- [ ] CUDA backend for GPU training
+- [ ] Metal compute shaders for Apple GPU inference
+- [ ] Attention with sliding window + group-query (GQA)
+- [ ] WASM target for browser inference
+- [ ] Larger model support (stories42M, stories110M)
 
 ## License
 

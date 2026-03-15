@@ -25,6 +25,7 @@ pub const tokenizer = @import("tokenizer.zig");
 pub const train = @import("train.zig");
 pub const gpu = @import("gpu.zig");
 pub const gpu_train = @import("gpu_train.zig");
+pub const llama2 = @import("llama2.zig");
 
 // Re-export core types
 pub const Tensor = tensor.Tensor;
