@@ -269,12 +269,12 @@ pub const QuantizedWeights = struct {
 const quant_matmul = @import("quant_matmul.zig");
 
 /// Matrix-vector multiply using raw quantized data (no dequantization).
-/// Uses NEON-accelerated kernel for Q5_0 on aarch64.
 fn matmulRaw(out: []f32, x: []const f32, raw_data: []const u8, n_cols: usize, tensor_type: u32) void {
-    if (@import("builtin").cpu.arch == .aarch64) {
-        neon.matmulQuantizedNeon(raw_data, x, out, n_cols, out.len, tensor_type);
-    } else {
-        quant_matmul.matmulQuantized(raw_data, x, out, n_cols, out.len, tensor_type);
+    const n_rows = out.len;
+    const rb = quant_matmul.rowBytes(n_cols, tensor_type);
+
+    for (0..n_rows) |i| {
+        out[i] = quant_matmul.dotQuantizedRow(raw_data[i * rb ..][0..rb], x[0..n_cols], n_cols, tensor_type);
     }
 }
 
