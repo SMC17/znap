@@ -36,6 +36,19 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run inference benchmarks");
     bench_step.dependOn(&run_bench.step);
 
+    const audit_exe = b.addExecutable(.{
+        .name = "znap-audit",
+        .root_source_file = b.path("benchmarks/audit.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    audit_exe.root_module.addImport("znap", lib.root_module);
+    b.installArtifact(audit_exe);
+
+    const run_audit = b.addRunArtifact(audit_exe);
+    const audit_step = b.step("audit", "Run honest audit with trained weights");
+    audit_step.dependOn(&run_audit.step);
+
     // ── Examples ─────────────────────────────────────────────────
     const rl_example = b.addExecutable(.{
         .name = "rl-agent",
