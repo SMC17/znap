@@ -18,6 +18,8 @@ pub const quantized = @import("quantized.zig");
 pub const policy = @import("policy.zig");
 pub const replay = @import("replay.zig");
 pub const parallel = @import("parallel.zig");
+pub const attention = @import("attention.zig");
+pub const transformer = @import("transformer.zig");
 
 // Re-export core types
 pub const Tensor = tensor.Tensor;
@@ -41,6 +43,18 @@ pub const Transition = replay.Transition;
 pub const evaluateParallel = parallel.evaluateParallel;
 pub const ParallelResult = parallel.ParallelResult;
 
+// Transformer
+pub const CausalAttention = attention.CausalAttention;
+pub const MultiHeadAttention = attention.MultiHeadAttention;
+pub const KVCache = attention.KVCache;
+pub const Transformer = transformer.Transformer;
+pub const TransformerBlock = transformer.TransformerBlock;
+pub const SwiGLU = transformer.SwiGLU;
+pub const rmsNorm = attention.rmsNorm;
+pub const applyRoPE = attention.applyRoPE;
+pub const topKSample = attention.topKSample;
+pub const greedySample = attention.greedySample;
+
 // ── Library metadata ─────────────────────────────────────────────
 
 pub const version = "0.1.0";
@@ -55,4 +69,6 @@ test {
     _ = policy;
     _ = replay;
     _ = parallel;
+    _ = attention;
+    _ = transformer;
 }

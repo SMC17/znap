@@ -58,6 +58,8 @@ pub fn build(b: *std.Build) void {
         "src/policy.zig",
         "src/replay.zig",
         "src/parallel.zig",
+        "src/attention.zig",
+        "src/transformer.zig",
         "src/znap.zig",
     };
 
