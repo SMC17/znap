@@ -12,6 +12,7 @@ const std = @import("std");
 const simd = @import("simd.zig");
 const gguf_mod = @import("gguf.zig");
 const int8 = @import("int8_matmul.zig");
+const w8a8 = @import("w8a8.zig");
 
 pub const Config = struct {
     dim: u32,
@@ -812,6 +813,157 @@ pub const Tokenizer = struct {
         allocator.free(self.data);
     }
 };
+
+// ── W8A8 Weights and Forward ─────────────────────────────────────
+
+pub const W8A8ModelWeights = struct {
+    wq: w8a8.W8A8Weights,
+    wk: w8a8.W8A8Weights,
+    wv: w8a8.W8A8Weights,
+    wo: w8a8.W8A8Weights,
+    w1: w8a8.W8A8Weights,
+    w2: w8a8.W8A8Weights,
+    w3: w8a8.W8A8Weights,
+    wcls: w8a8.W8A8Weights,
+
+    pub fn fromWeights(wt: *const Weights, config: Config, allocator: std.mem.Allocator) !W8A8ModelWeights {
+        const dim = config.dim;
+        const hidden = config.hidden_dim;
+        const kv = config.kvDim();
+        const nl = config.n_layers;
+        const vocab = @as(u32, @intCast(if (config.vocab_size < 0) -config.vocab_size else config.vocab_size));
+
+        return .{
+            .wq = try w8a8.W8A8Weights.fromF32(wt.wq, nl * dim, dim, allocator),
+            .wk = try w8a8.W8A8Weights.fromF32(wt.wk, nl * kv, dim, allocator),
+            .wv = try w8a8.W8A8Weights.fromF32(wt.wv, nl * kv, dim, allocator),
+            .wo = try w8a8.W8A8Weights.fromF32(wt.wo, nl * dim, dim, allocator),
+            .w1 = try w8a8.W8A8Weights.fromF32(wt.w1, nl * hidden, dim, allocator),
+            .w2 = try w8a8.W8A8Weights.fromF32(wt.w2, nl * dim, hidden, allocator),
+            .w3 = try w8a8.W8A8Weights.fromF32(wt.w3, nl * hidden, dim, allocator),
+            .wcls = try w8a8.W8A8Weights.fromF32(wt.wcls, vocab, dim, allocator),
+        };
+    }
+
+    pub fn deinit(self: *W8A8ModelWeights, allocator: std.mem.Allocator) void {
+        self.wq.deinit(allocator);
+        self.wk.deinit(allocator);
+        self.wv.deinit(allocator);
+        self.wo.deinit(allocator);
+        self.w1.deinit(allocator);
+        self.w2.deinit(allocator);
+        self.w3.deinit(allocator);
+        self.wcls.deinit(allocator);
+    }
+};
+
+fn w8a8Matmul(out: []f32, x: []const f32, ww: *const w8a8.W8A8Weights, row_offset: usize, n_cols: usize) void {
+    const n_rows = out.len;
+    w8a8.matmulW8A8Threaded(
+        ww.scales[row_offset .. row_offset + n_rows],
+        ww.data[row_offset * n_cols ..],
+        x,
+        out,
+        n_cols,
+        n_rows,
+    );
+}
+
+pub fn forwardW8A8(config: Config, weights: *const Weights, ww: *const W8A8ModelWeights, state: *RunState, token: u32, pos: u32) void {
+    const dim = config.dim;
+    const hidden_dim = config.hidden_dim;
+    const head_dim = config.headDim();
+    const kv_dim = config.kvDim();
+    const kv_mul = config.kvMul();
+    const n_heads = config.n_heads;
+    const n_layers = config.n_layers;
+    const seq_len = config.seq_len;
+
+    const emb = weights.token_embedding[token * dim .. (token + 1) * dim];
+    @memcpy(state.x, emb);
+
+    for (0..n_layers) |l| {
+        rmsNorm(state.xb, state.x, weights.rms_att_weight[l * dim .. (l + 1) * dim]);
+
+        // W8A8 matmuls — pure integer inner loop
+        w8a8Matmul(state.q, state.xb, &ww.wq, l * dim, dim);
+        w8a8Matmul(state.k, state.xb, &ww.wk, l * kv_dim, dim);
+        w8a8Matmul(state.v, state.xb, &ww.wv, l * kv_dim, dim);
+
+        // RoPE
+        for (0..n_heads) |h| {
+            const q_head = state.q[h * head_dim .. (h + 1) * head_dim];
+            var i: usize = 0;
+            while (i < head_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, config.rope_freq_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                const cos_a = @cos(angle);
+                const sin_a = @sin(angle);
+                const q0 = q_head[i];
+                const q1 = q_head[i + 1];
+                q_head[i] = q0 * cos_a - q1 * sin_a;
+                q_head[i + 1] = q0 * sin_a + q1 * cos_a;
+            }
+        }
+        for (0..config.n_kv_heads) |h| {
+            const k_head = state.k[h * head_dim .. (h + 1) * head_dim];
+            var i: usize = 0;
+            while (i < head_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, config.rope_freq_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                const cos_a = @cos(angle);
+                const sin_a = @sin(angle);
+                const k0 = k_head[i];
+                const k1 = k_head[i + 1];
+                k_head[i] = k0 * cos_a - k1 * sin_a;
+                k_head[i + 1] = k0 * sin_a + k1 * cos_a;
+            }
+        }
+
+        const cache_offset = l * seq_len * kv_dim + pos * kv_dim;
+        @memcpy(state.key_cache[cache_offset .. cache_offset + kv_dim], state.k);
+        @memcpy(state.value_cache[cache_offset .. cache_offset + kv_dim], state.v);
+
+        for (0..n_heads) |h| {
+            const q_head = state.q[h * head_dim .. (h + 1) * head_dim];
+            const att = state.att[h * seq_len .. h * seq_len + pos + 1];
+            for (0..pos + 1) |t| {
+                const kv_h = h / kv_mul;
+                const k_offset = l * seq_len * kv_dim + t * kv_dim + kv_h * head_dim;
+                const k_vec = state.key_cache[k_offset .. k_offset + head_dim];
+                var score: f32 = 0;
+                for (0..head_dim) |d_i| score += q_head[d_i] * k_vec[d_i];
+                att[t] = score / @sqrt(@as(f32, @floatFromInt(head_dim)));
+            }
+            softmax(att);
+            const xb_head = state.xb[h * head_dim .. (h + 1) * head_dim];
+            @memset(xb_head, 0);
+            for (0..pos + 1) |t| {
+                const kv_h = h / kv_mul;
+                const v_offset = l * seq_len * kv_dim + t * kv_dim + kv_h * head_dim;
+                const v_vec = state.value_cache[v_offset .. v_offset + head_dim];
+                for (0..head_dim) |d_i| xb_head[d_i] += att[t] * v_vec[d_i];
+            }
+        }
+
+        w8a8Matmul(state.xb2, state.xb, &ww.wo, l * dim, dim);
+        for (0..dim) |i| state.x[i] += state.xb2[i];
+
+        rmsNorm(state.xb, state.x, weights.rms_ffn_weight[l * dim .. (l + 1) * dim]);
+        w8a8Matmul(state.hb, state.xb, &ww.w1, l * hidden_dim, dim);
+        w8a8Matmul(state.hb2, state.xb, &ww.w3, l * hidden_dim, dim);
+
+        for (0..hidden_dim) |i| {
+            state.hb[i] = state.hb[i] * (1.0 / (1.0 + @exp(-state.hb[i]))) * state.hb2[i];
+        }
+
+        w8a8Matmul(state.xb, state.hb, &ww.w2, l * dim, hidden_dim);
+        for (0..dim) |i| state.x[i] += state.xb[i];
+    }
+
+    rmsNorm(state.x, state.x, weights.rms_final_weight);
+    w8a8Matmul(state.logits, state.x, &ww.wcls, 0, dim);
+}
 
 // ── Sampling ─────────────────────────────────────────────────────
 

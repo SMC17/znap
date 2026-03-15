@@ -34,6 +34,7 @@ pub const llama2 = @import("llama2.zig");
 pub const gguf = @import("gguf.zig");
 pub const quant_matmul = @import("quant_matmul.zig");
 pub const int8_matmul = @import("int8_matmul.zig");
+pub const w8a8 = @import("w8a8.zig");
 
 // Re-export core types
 pub const Tensor = tensor.Tensor;
@@ -121,4 +122,5 @@ test {
     _ = gguf;
     _ = quant_matmul;
     _ = int8_matmul;
+    _ = w8a8;
 }
