@@ -99,6 +99,9 @@ fn runGGUF(
         }
     }
 
+    // TODO: native quantized forward pass (Q4_K kernel needs ggml-exact nibble ordering)
+    // For now, use the dequantized f32 path which produces correct output.
+
     var pos: u32 = 0;
     var actual_tokens: u32 = 0;
 

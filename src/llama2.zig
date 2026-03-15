@@ -227,6 +227,36 @@ fn matmul(out: []f32, x: []const f32, w: []const f32, n: usize) void {
     for (0..spawned) |t| threads[t].join();
 }
 
+/// Quantized weight storage — raw bytes + metadata for native quantized matmul.
+pub const QuantizedLayer = struct {
+    raw_wq: []const u8,
+    raw_wk: []const u8,
+    raw_wv: []const u8,
+    raw_wo: []const u8,
+    raw_w1: []const u8,
+    raw_w2: []const u8,
+    raw_w3: []const u8,
+    tensor_type: u32,
+    n_cols_attn: usize, // dim for attn weights
+    n_cols_ffn: usize, // dim for ffn weights (w1, w3 input)
+    n_cols_ffn_down: usize, // hidden_dim for w2 input
+};
+
+pub const QuantizedWeights = struct {
+    layers: []QuantizedLayer,
+    raw_wcls: ?[]const u8,
+    wcls_type: u32,
+    wcls_cols: usize,
+    wcls_rows: usize,
+};
+
+const quant_matmul = @import("quant_matmul.zig");
+
+/// Matrix-vector multiply using raw quantized data (no dequantization).
+fn matmulRaw(out: []f32, x: []const f32, raw_data: []const u8, n_cols: usize, tensor_type: u32) void {
+    quant_matmul.matmulQuantized(raw_data, x, out, n_cols, out.len, tensor_type);
+}
+
 // ── Transformer Forward Pass ─────────────────────────────────────
 
 pub fn forward(config: Config, weights: *const Weights, state: *RunState, token: u32, pos: u32) void {
@@ -342,6 +372,127 @@ pub fn forward(config: Config, weights: *const Weights, state: *RunState, token:
 
     // Classifier
     matmul(state.logits, state.x, weights.wcls, dim);
+}
+
+/// Forward pass using quantized weights directly (no dequantization).
+/// Uses f32 for embeddings and norms, raw quantized data for matmuls.
+pub fn forwardQuantized(
+    config: Config,
+    weights: *const Weights, // For embeddings and norms (always f32)
+    qw: *const QuantizedWeights,
+    state: *RunState,
+    token: u32,
+    pos: u32,
+) void {
+    const dim = config.dim;
+    const hidden_dim = config.hidden_dim;
+    const head_dim = config.headDim();
+    const kv_dim = config.kvDim();
+    const kv_mul = config.kvMul();
+    const n_heads = config.n_heads;
+    const n_layers = config.n_layers;
+    const seq_len = config.seq_len;
+
+    // Token embedding (always f32)
+    const emb = weights.token_embedding[token * dim .. (token + 1) * dim];
+    @memcpy(state.x, emb);
+
+    for (0..n_layers) |l| {
+        const ql = &qw.layers[l];
+
+        // Attention RMSNorm (f32)
+        rmsNorm(state.xb, state.x, weights.rms_att_weight[l * dim .. (l + 1) * dim]);
+
+        // QKV projections — NATIVE QUANTIZED (the main speedup)
+        matmulRaw(state.q, state.xb, ql.raw_wq, ql.n_cols_attn, ql.tensor_type);
+        matmulRaw(state.k, state.xb, ql.raw_wk, ql.n_cols_attn, ql.tensor_type);
+        matmulRaw(state.v, state.xb, ql.raw_wv, ql.n_cols_attn, ql.tensor_type);
+
+        // RoPE (same as f32 path)
+        for (0..n_heads) |h| {
+            const q_head = state.q[h * head_dim .. (h + 1) * head_dim];
+            var i: usize = 0;
+            while (i < head_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, config.rope_freq_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                const cos_a = @cos(angle);
+                const sin_a = @sin(angle);
+                const q0 = q_head[i];
+                const q1 = q_head[i + 1];
+                q_head[i] = q0 * cos_a - q1 * sin_a;
+                q_head[i + 1] = q0 * sin_a + q1 * cos_a;
+            }
+        }
+        for (0..config.n_kv_heads) |h| {
+            const k_head = state.k[h * head_dim .. (h + 1) * head_dim];
+            var i: usize = 0;
+            while (i < head_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, config.rope_freq_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                const cos_a = @cos(angle);
+                const sin_a = @sin(angle);
+                const k0 = k_head[i];
+                const k1 = k_head[i + 1];
+                k_head[i] = k0 * cos_a - k1 * sin_a;
+                k_head[i + 1] = k0 * sin_a + k1 * cos_a;
+            }
+        }
+
+        // KV cache (same)
+        const cache_offset = l * seq_len * kv_dim + pos * kv_dim;
+        @memcpy(state.key_cache[cache_offset .. cache_offset + kv_dim], state.k);
+        @memcpy(state.value_cache[cache_offset .. cache_offset + kv_dim], state.v);
+
+        // Attention (same — operates on f32 Q, cached K/V)
+        for (0..n_heads) |h| {
+            const q_head = state.q[h * head_dim .. (h + 1) * head_dim];
+            const att = state.att[h * seq_len .. h * seq_len + pos + 1];
+            for (0..pos + 1) |t| {
+                const kv_h = h / kv_mul;
+                const k_offset = l * seq_len * kv_dim + t * kv_dim + kv_h * head_dim;
+                const k_vec = state.key_cache[k_offset .. k_offset + head_dim];
+                var score: f32 = 0;
+                for (0..head_dim) |d| score += q_head[d] * k_vec[d];
+                att[t] = score / @sqrt(@as(f32, @floatFromInt(head_dim)));
+            }
+            softmax(att);
+            const xb_head = state.xb[h * head_dim .. (h + 1) * head_dim];
+            @memset(xb_head, 0);
+            for (0..pos + 1) |t| {
+                const kv_h = h / kv_mul;
+                const v_offset = l * seq_len * kv_dim + t * kv_dim + kv_h * head_dim;
+                const v_vec = state.value_cache[v_offset .. v_offset + head_dim];
+                for (0..head_dim) |d| xb_head[d] += att[t] * v_vec[d];
+            }
+        }
+
+        // Output projection — NATIVE QUANTIZED
+        matmulRaw(state.xb2, state.xb, ql.raw_wo, ql.n_cols_attn, ql.tensor_type);
+        for (0..dim) |i| state.x[i] += state.xb2[i];
+
+        // FFN
+        rmsNorm(state.xb, state.x, weights.rms_ffn_weight[l * dim .. (l + 1) * dim]);
+        matmulRaw(state.hb, state.xb, ql.raw_w1, ql.n_cols_ffn, ql.tensor_type);
+        matmulRaw(state.hb2, state.xb, ql.raw_w3, ql.n_cols_ffn, ql.tensor_type);
+
+        // SwiGLU
+        for (0..hidden_dim) |i| {
+            state.hb[i] = state.hb[i] * (1.0 / (1.0 + @exp(-state.hb[i]))) * state.hb2[i];
+        }
+
+        matmulRaw(state.xb, state.hb, ql.raw_w2, ql.n_cols_ffn_down, ql.tensor_type);
+        for (0..dim) |i| state.x[i] += state.xb[i];
+    }
+
+    // Final RMSNorm (f32)
+    rmsNorm(state.x, state.x, weights.rms_final_weight);
+
+    // Classifier — quantized if available, else f32
+    if (qw.raw_wcls) |raw| {
+        matmulRaw(state.logits, state.x, raw, qw.wcls_cols, qw.wcls_type);
+    } else {
+        matmul(state.logits, state.x, weights.wcls, dim);
+    }
 }
 
 // ── Model Loading ────────────────────────────────────────────────
@@ -809,6 +960,69 @@ pub const GGUFModel = struct {
             var gf_mut = gf.*;
             gf_mut.deinit();
         }
+    }
+
+    /// Get raw tensor data from the GGUF file by name.
+    fn getRawTensor(gf: *const gguf_mod.GGUFFile, name: []const u8) ?[]const u8 {
+        const info = gf.getTensorInfo(name) orelse return null;
+        const raw_bytes = (info.numElements() / info.tensor_type.blockSize()) * info.tensor_type.bytesPerBlock();
+        const data_start = gf.data_offset + info.offset;
+        if (data_start + raw_bytes > gf.file_data.len) return null;
+        return gf.file_data[data_start .. data_start + raw_bytes];
+    }
+
+    /// Build QuantizedWeights for native quantized forward pass.
+    pub fn quantizedWeights(self: *const GGUFModel, allocator: std.mem.Allocator) !?QuantizedWeights {
+        const gf = &(self.gguf_file orelse return null);
+
+        const n_layers = self.config.n_layers;
+        const dim = self.config.dim;
+        const hidden_dim = self.config.hidden_dim;
+
+        var layers = try allocator.alloc(QuantizedLayer, n_layers);
+
+        for (0..n_layers) |l| {
+            // Build tensor names with separate buffers
+            var buf_wq: [64]u8 = undefined;
+            var buf_wk: [64]u8 = undefined;
+            var buf_wv: [64]u8 = undefined;
+            var buf_wo: [64]u8 = undefined;
+            var buf_w1: [64]u8 = undefined;
+            var buf_w2: [64]u8 = undefined;
+            var buf_w3: [64]u8 = undefined;
+
+            const name_wq = try std.fmt.bufPrint(&buf_wq, "blk.{d}.attn_q.weight", .{l});
+            const name_wk = try std.fmt.bufPrint(&buf_wk, "blk.{d}.attn_k.weight", .{l});
+            const name_wv = try std.fmt.bufPrint(&buf_wv, "blk.{d}.attn_v.weight", .{l});
+            const name_wo = try std.fmt.bufPrint(&buf_wo, "blk.{d}.attn_output.weight", .{l});
+            const name_w1 = try std.fmt.bufPrint(&buf_w1, "blk.{d}.ffn_gate.weight", .{l});
+            const name_w2 = try std.fmt.bufPrint(&buf_w2, "blk.{d}.ffn_down.weight", .{l});
+            const name_w3 = try std.fmt.bufPrint(&buf_w3, "blk.{d}.ffn_up.weight", .{l});
+
+            const wq_info = gf.getTensorInfo(name_wq) orelse return null;
+
+            layers[l] = .{
+                .raw_wq = getRawTensor(gf, name_wq) orelse return null,
+                .raw_wk = getRawTensor(gf, name_wk) orelse return null,
+                .raw_wv = getRawTensor(gf, name_wv) orelse return null,
+                .raw_wo = getRawTensor(gf, name_wo) orelse return null,
+                .raw_w1 = getRawTensor(gf, name_w1) orelse return null,
+                .raw_w2 = getRawTensor(gf, name_w2) orelse return null,
+                .raw_w3 = getRawTensor(gf, name_w3) orelse return null,
+                .tensor_type = @intFromEnum(wq_info.tensor_type),
+                .n_cols_attn = dim,
+                .n_cols_ffn = dim,
+                .n_cols_ffn_down = hidden_dim,
+            };
+        }
+
+        return .{
+            .layers = layers,
+            .raw_wcls = getRawTensor(gf, "output.weight"),
+            .wcls_type = if (gf.getTensorInfo("output.weight")) |i| @intFromEnum(i.tensor_type) else 0,
+            .wcls_cols = dim,
+            .wcls_rows = @intCast(if (self.config.vocab_size < 0) -self.config.vocab_size else self.config.vocab_size),
+        };
     }
 
     /// Create a Tokenizer from the GGUF-embedded vocabulary.
