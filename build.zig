@@ -194,6 +194,7 @@ pub fn build(b: *std.Build) void {
         "src/quant_matmul.zig",
         "src/int8_matmul.zig",
         "src/w8a8.zig",
+        "src/neon.zig",
         "src/znap.zig",
     };
 

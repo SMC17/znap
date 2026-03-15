@@ -123,4 +123,7 @@ test {
     _ = quant_matmul;
     _ = int8_matmul;
     _ = w8a8;
+    if (@import("builtin").cpu.arch == .aarch64) {
+        _ = @import("neon.zig");
+    }
 }

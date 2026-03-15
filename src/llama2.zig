@@ -13,6 +13,7 @@ const simd = @import("simd.zig");
 const gguf_mod = @import("gguf.zig");
 const int8 = @import("int8_matmul.zig");
 const w8a8 = @import("w8a8.zig");
+const neon = @import("neon.zig");
 
 pub const Config = struct {
     dim: u32,
@@ -133,28 +134,39 @@ fn softmax(x: []f32) void {
 
 // ── Matrix-Vector Multiply (SIMD-accelerated) ────────────────────
 
-/// SIMD dot product of a single row.
+/// SIMD dot product of a single row — 8-way unrolled for maximum ILP.
 fn dotRow(row: []const f32, x: []const f32, n: usize) f32 {
-    const VEC_SIZE = 4;
-    var acc0: @Vector(VEC_SIZE, f32) = @splat(0);
-    var acc1: @Vector(VEC_SIZE, f32) = @splat(0);
-    var acc2: @Vector(VEC_SIZE, f32) = @splat(0);
-    var acc3: @Vector(VEC_SIZE, f32) = @splat(0);
+    const V = 4;
+    // 8 accumulators to maximize instruction-level parallelism
+    // M1 can issue 4 FMLA per cycle with enough independent accumulators
+    var a0: @Vector(V, f32) = @splat(0);
+    var a1: @Vector(V, f32) = @splat(0);
+    var a2: @Vector(V, f32) = @splat(0);
+    var a3: @Vector(V, f32) = @splat(0);
+    var a4: @Vector(V, f32) = @splat(0);
+    var a5: @Vector(V, f32) = @splat(0);
+    var a6: @Vector(V, f32) = @splat(0);
+    var a7: @Vector(V, f32) = @splat(0);
     var j: usize = 0;
 
-    while (j + 16 <= n) : (j += 16) {
-        acc0 += @as(@Vector(VEC_SIZE, f32), row[j..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j..][0..4].*);
-        acc1 += @as(@Vector(VEC_SIZE, f32), row[j + 4 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 4 ..][0..4].*);
-        acc2 += @as(@Vector(VEC_SIZE, f32), row[j + 8 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 8 ..][0..4].*);
-        acc3 += @as(@Vector(VEC_SIZE, f32), row[j + 12 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 12 ..][0..4].*);
+    // Process 32 floats per iteration (8 × 4-wide FMLA)
+    while (j + 32 <= n) : (j += 32) {
+        a0 += @as(@Vector(V, f32), row[j..][0..4].*) * @as(@Vector(V, f32), x[j..][0..4].*);
+        a1 += @as(@Vector(V, f32), row[j + 4 ..][0..4].*) * @as(@Vector(V, f32), x[j + 4 ..][0..4].*);
+        a2 += @as(@Vector(V, f32), row[j + 8 ..][0..4].*) * @as(@Vector(V, f32), x[j + 8 ..][0..4].*);
+        a3 += @as(@Vector(V, f32), row[j + 12 ..][0..4].*) * @as(@Vector(V, f32), x[j + 12 ..][0..4].*);
+        a4 += @as(@Vector(V, f32), row[j + 16 ..][0..4].*) * @as(@Vector(V, f32), x[j + 16 ..][0..4].*);
+        a5 += @as(@Vector(V, f32), row[j + 20 ..][0..4].*) * @as(@Vector(V, f32), x[j + 20 ..][0..4].*);
+        a6 += @as(@Vector(V, f32), row[j + 24 ..][0..4].*) * @as(@Vector(V, f32), x[j + 24 ..][0..4].*);
+        a7 += @as(@Vector(V, f32), row[j + 28 ..][0..4].*) * @as(@Vector(V, f32), x[j + 28 ..][0..4].*);
     }
 
-    var sum = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
+    // Reduce: merge 8 accumulators → 1
+    var sum = @reduce(.Add, (a0 + a1) + (a2 + a3) + (a4 + a5) + (a6 + a7));
 
-    while (j + VEC_SIZE <= n) : (j += VEC_SIZE) {
-        const rv: @Vector(VEC_SIZE, f32) = row[j..][0..VEC_SIZE].*;
-        const xv: @Vector(VEC_SIZE, f32) = x[j..][0..VEC_SIZE].*;
-        sum += @reduce(.Add, rv * xv);
+    // Handle remaining 4-at-a-time
+    while (j + V <= n) : (j += V) {
+        sum += @reduce(.Add, @as(@Vector(V, f32), row[j..][0..V].*) * @as(@Vector(V, f32), x[j..][0..V].*));
     }
 
     while (j < n) : (j += 1) sum += row[j] * x[j];
@@ -859,14 +871,26 @@ pub const W8A8ModelWeights = struct {
 
 fn w8a8Matmul(out: []f32, x: []const f32, ww: *const w8a8.W8A8Weights, row_offset: usize, n_cols: usize) void {
     const n_rows = out.len;
-    w8a8.matmulW8A8Threaded(
-        ww.scales[row_offset .. row_offset + n_rows],
-        ww.data[row_offset * n_cols ..],
-        x,
-        out,
-        n_cols,
-        n_rows,
-    );
+    // Use NEON SDOT-accelerated matmul on ARM
+    if (@import("builtin").cpu.arch == .aarch64) {
+        neon.matmulNeonThreaded(
+            ww.scales[row_offset .. row_offset + n_rows],
+            ww.data[row_offset * n_cols ..],
+            x,
+            out,
+            n_cols,
+            n_rows,
+        );
+    } else {
+        w8a8.matmulW8A8Threaded(
+            ww.scales[row_offset .. row_offset + n_rows],
+            ww.data[row_offset * n_cols ..],
+            x,
+            out,
+            n_cols,
+            n_rows,
+        );
+    }
 }
 
 pub fn forwardW8A8(config: Config, weights: *const Weights, ww: *const W8A8ModelWeights, state: *RunState, token: u32, pos: u32) void {

@@ -99,12 +99,6 @@ fn runGGUF(
         }
     }
 
-    // f32 dequant path — fastest correct path (89 tok/s, SIMD + multithreaded)
-    // W8A8 and native quantized paths are implemented but limited by:
-    //   - W8A8: activation quantization too lossy for 30-layer models
-    //   - Native Q5_0: bit extraction can't be vectorized in pure Zig
-    //   - INT8 w × f32 act: same speed as f32 (conversion dominates)
-
     var pos: u32 = 0;
     var actual_tokens: u32 = 0;
 
