@@ -131,45 +131,100 @@ fn softmax(x: []f32) void {
 
 // ── Matrix-Vector Multiply (SIMD-accelerated) ────────────────────
 
+/// SIMD dot product of a single row.
+fn dotRow(row: []const f32, x: []const f32, n: usize) f32 {
+    const VEC_SIZE = 4;
+    var acc0: @Vector(VEC_SIZE, f32) = @splat(0);
+    var acc1: @Vector(VEC_SIZE, f32) = @splat(0);
+    var acc2: @Vector(VEC_SIZE, f32) = @splat(0);
+    var acc3: @Vector(VEC_SIZE, f32) = @splat(0);
+    var j: usize = 0;
+
+    while (j + 16 <= n) : (j += 16) {
+        acc0 += @as(@Vector(VEC_SIZE, f32), row[j..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j..][0..4].*);
+        acc1 += @as(@Vector(VEC_SIZE, f32), row[j + 4 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 4 ..][0..4].*);
+        acc2 += @as(@Vector(VEC_SIZE, f32), row[j + 8 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 8 ..][0..4].*);
+        acc3 += @as(@Vector(VEC_SIZE, f32), row[j + 12 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 12 ..][0..4].*);
+    }
+
+    var sum = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
+
+    while (j + VEC_SIZE <= n) : (j += VEC_SIZE) {
+        const rv: @Vector(VEC_SIZE, f32) = row[j..][0..VEC_SIZE].*;
+        const xv: @Vector(VEC_SIZE, f32) = x[j..][0..VEC_SIZE].*;
+        sum += @reduce(.Add, rv * xv);
+    }
+
+    while (j < n) : (j += 1) sum += row[j] * x[j];
+
+    return sum;
+}
+
+/// Multithreaded worker for parallel matmul rows.
+const MatmulWork = struct {
+    out: []f32,
+    w: []const f32,
+    x: []const f32,
+    n: usize,
+    start_row: usize,
+    end_row: usize,
+};
+
+fn matmulWorker(work: MatmulWork) void {
+    for (work.start_row..work.end_row) |i| {
+        work.out[i] = dotRow(work.w[i * work.n ..][0..work.n], work.x, work.n);
+    }
+}
+
 fn matmul(out: []f32, x: []const f32, w: []const f32, n: usize) void {
     const d = out.len;
-    const VEC_SIZE = 4; // NEON: 4 × f32
 
-    for (0..d) |i| {
-        const row = w[i * n ..][0..n];
-
-        // 4-way unrolled SIMD accumulation
-        var acc0: @Vector(VEC_SIZE, f32) = @splat(0);
-        var acc1: @Vector(VEC_SIZE, f32) = @splat(0);
-        var acc2: @Vector(VEC_SIZE, f32) = @splat(0);
-        var acc3: @Vector(VEC_SIZE, f32) = @splat(0);
-        var j: usize = 0;
-
-        // Main loop: 16 elements per iteration (4 vectors × 4 floats)
-        while (j + 16 <= n) : (j += 16) {
-            acc0 += @as(@Vector(VEC_SIZE, f32), row[j..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j..][0..4].*);
-            acc1 += @as(@Vector(VEC_SIZE, f32), row[j + 4 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 4 ..][0..4].*);
-            acc2 += @as(@Vector(VEC_SIZE, f32), row[j + 8 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 8 ..][0..4].*);
-            acc3 += @as(@Vector(VEC_SIZE, f32), row[j + 12 ..][0..4].*) * @as(@Vector(VEC_SIZE, f32), x[j + 12 ..][0..4].*);
+    // Only multithread for truly large matmuls (vocab projection).
+    // Thread spawn overhead (~20μs) must be amortized over enough work.
+    // Vocab projections: 32K-49K output rows × 288-576 cols = 9M-28M elements.
+    // Layer matmuls: 288-1536 rows × 288-576 cols = 83K-885K elements.
+    // Threshold: 2M elements — only catches vocab projections.
+    if (d * n < 2_000_000) {
+        for (0..d) |i| {
+            out[i] = dotRow(w[i * n ..][0..n], x, n);
         }
-
-        // Reduce 4 accumulators
-        var sum = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
-
-        // Handle remaining elements with single vector
-        while (j + VEC_SIZE <= n) : (j += VEC_SIZE) {
-            const rv: @Vector(VEC_SIZE, f32) = row[j..][0..VEC_SIZE].*;
-            const xv: @Vector(VEC_SIZE, f32) = x[j..][0..VEC_SIZE].*;
-            sum += @reduce(.Add, rv * xv);
-        }
-
-        // Scalar remainder
-        while (j < n) : (j += 1) {
-            sum += row[j] * x[j];
-        }
-
-        out[i] = sum;
+        return;
     }
+
+    // Multithreaded: split rows across available cores
+    const n_threads = @min(std.Thread.getCpuCount() catch 1, 8);
+    if (n_threads <= 1) {
+        for (0..d) |i| {
+            out[i] = dotRow(w[i * n ..][0..n], x, n);
+        }
+        return;
+    }
+
+    const rows_per_thread = d / n_threads;
+    var threads: [8]std.Thread = undefined;
+    var spawned: usize = 0;
+
+    for (0..n_threads) |t| {
+        const start = t * rows_per_thread;
+        const end = if (t == n_threads - 1) d else (t + 1) * rows_per_thread;
+        if (start >= end) continue;
+
+        threads[t] = std.Thread.spawn(.{}, matmulWorker, .{MatmulWork{
+            .out = out,
+            .w = w,
+            .x = x,
+            .n = n,
+            .start_row = start,
+            .end_row = end,
+        }}) catch {
+            // Fallback: do this chunk on current thread
+            matmulWorker(.{ .out = out, .w = w, .x = x, .n = n, .start_row = start, .end_row = end });
+            continue;
+        };
+        spawned += 1;
+    }
+
+    for (0..spawned) |t| threads[t].join();
 }
 
 // ── Transformer Forward Pass ─────────────────────────────────────
@@ -529,6 +584,17 @@ pub const GGUFModel = struct {
     w3_data: []f32, // ffn_up
     rms_final_weight_data: []f32,
     wcls_data: ?[]f32, // null if tied with token_embedding
+
+    // Raw quantized data pointers (for native quantized matmul)
+    raw_wq: ?[]const u8 = null,
+    raw_wk: ?[]const u8 = null,
+    raw_wv: ?[]const u8 = null,
+    raw_wo: ?[]const u8 = null,
+    raw_w1: ?[]const u8 = null,
+    raw_w2: ?[]const u8 = null,
+    raw_w3: ?[]const u8 = null,
+    raw_wcls: ?[]const u8 = null,
+    quant_type: u32 = 0, // TensorType of the weight matrices
 
     // GGUF tokenizer
     vocab_strings: ?[][]const u8,
