@@ -154,6 +154,22 @@ pub fn build(b: *std.Build) void {
     const train_step = b.step("train", "Train a tiny model and generate text");
     train_step.dependOn(&run_train.step);
 
+    const gen_example = b.addExecutable(.{
+        .name = "generate",
+        .root_source_file = b.path("examples/generate.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    gen_example.root_module.addImport("znap", lib.root_module);
+    b.installArtifact(gen_example);
+
+    const run_gen = b.addRunArtifact(gen_example);
+    if (b.args) |args| {
+        run_gen.addArgs(args);
+    }
+    const run_step = b.step("run", "Generate text from a pretrained model");
+    run_step.dependOn(&run_gen.step);
+
     // ── Tests ────────────────────────────────────────────────────
     const test_files = [_][]const u8{
         "src/tensor.zig",

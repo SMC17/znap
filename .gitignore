@@ -4,3 +4,5 @@ zig-out/
 *.a
 *.so
 *.dylib
+models/*.bin
+models/*.gguf
