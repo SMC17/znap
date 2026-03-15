@@ -35,7 +35,7 @@ pub const gguf = @import("gguf.zig");
 pub const quant_matmul = @import("quant_matmul.zig");
 pub const int8_matmul = @import("int8_matmul.zig");
 pub const w8a8 = @import("w8a8.zig");
-
+pub const sdot_matmul = @import("sdot_matmul.zig");
 // Re-export core types
 pub const Tensor = tensor.Tensor;
 pub const Vec = tensor.Vec;

@@ -14,6 +14,7 @@ const gguf_mod = @import("gguf.zig");
 const int8 = @import("int8_matmul.zig");
 const w8a8 = @import("w8a8.zig");
 const neon = @import("neon.zig");
+const sdot_mm = @import("sdot_matmul.zig");
 
 pub const Config = struct {
     dim: u32,
@@ -272,7 +273,6 @@ const quant_matmul = @import("quant_matmul.zig");
 fn matmulRaw(out: []f32, x: []const f32, raw_data: []const u8, n_cols: usize, tensor_type: u32) void {
     const n_rows = out.len;
     const rb = quant_matmul.rowBytes(n_cols, tensor_type);
-
     for (0..n_rows) |i| {
         out[i] = quant_matmul.dotQuantizedRow(raw_data[i * rb ..][0..rb], x[0..n_cols], n_cols, tensor_type);
     }
