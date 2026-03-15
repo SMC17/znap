@@ -30,6 +30,7 @@ fn readU32LE(data: []const u8, offset: usize) u32 {
 // ── Q4_0: 4-bit quantization ─────────────────────────────────────
 // Block: [f16 scale (2)] [16 bytes nibbles (32 weights)] = 18 bytes
 
+/// Q4_0 fused dot product — process 4 bytes at a time, pure @Vector.
 pub fn dotQ4_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
     const BS: usize = 32;
     const BB: usize = 18;
@@ -41,15 +42,28 @@ pub fn dotQ4_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
         const d = f16ToF32(readU16LE(block, 0));
         const xb = x[block_idx * BS ..];
 
-        var sum: f32 = 0;
-        for (0..16) |j| {
-            const byte = block[2 + j];
-            // ggml layout: low nibble -> weight j (0..15), high nibble -> weight j+16 (16..31)
-            const lo = @as(f32, @floatFromInt(@as(i8, @intCast(byte & 0xF)) - 8));
-            const hi = @as(f32, @floatFromInt(@as(i8, @intCast(byte >> 4)) - 8));
-            sum += lo * xb[j] + hi * xb[j + 16];
+        var acc_lo: @Vector(4, f32) = @splat(0);
+        var acc_hi: @Vector(4, f32) = @splat(0);
+
+        comptime var j: usize = 0;
+        inline while (j < 16) : (j += 4) {
+            const lo = @Vector(4, f32){
+                @floatFromInt(@as(i8, @intCast(block[2 + j] & 0xF)) - 8),
+                @floatFromInt(@as(i8, @intCast(block[2 + j + 1] & 0xF)) - 8),
+                @floatFromInt(@as(i8, @intCast(block[2 + j + 2] & 0xF)) - 8),
+                @floatFromInt(@as(i8, @intCast(block[2 + j + 3] & 0xF)) - 8),
+            };
+            const hi = @Vector(4, f32){
+                @floatFromInt(@as(i8, @intCast(block[2 + j] >> 4)) - 8),
+                @floatFromInt(@as(i8, @intCast(block[2 + j + 1] >> 4)) - 8),
+                @floatFromInt(@as(i8, @intCast(block[2 + j + 2] >> 4)) - 8),
+                @floatFromInt(@as(i8, @intCast(block[2 + j + 3] >> 4)) - 8),
+            };
+            acc_lo += lo * @as(@Vector(4, f32), xb[j..][0..4].*);
+            acc_hi += hi * @as(@Vector(4, f32), xb[j + 16 ..][0..4].*);
         }
-        total += d * sum;
+
+        total += d * (@reduce(.Add, acc_lo) + @reduce(.Add, acc_hi));
     }
     return total;
 }
@@ -57,6 +71,11 @@ pub fn dotQ4_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
 // ── Q5_0: 5-bit quantization ─────────────────────────────────────
 // Block: [f16 scale (2)] [u32 high bits (4)] [16 bytes nibbles] = 22 bytes
 
+/// Q5_0 fused dequant+accumulate using vectorized byte extraction.
+///
+/// Key optimization: load 16 packed bytes as @Vector(16, u8), extract
+/// all 16 low nibbles and 16 high nibbles simultaneously with vector
+/// bitwise ops, convert to f32, multiply-accumulate.
 pub fn dotQ5_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
     const BS: usize = 32;
     const BB: usize = 22;
@@ -69,36 +88,42 @@ pub fn dotQ5_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
         const qh = readU32LE(block, 2);
         const xb = x[block_idx * BS ..];
 
-        // Dequantize 32 weights into a temporary buffer, then SIMD dot product
-        var dq: [32]f32 = undefined;
-        for (0..16) |j| {
-            const byte = block[6 + j];
-            const lo_nib: u8 = byte & 0xF;
-            const hi_nib: u8 = byte >> 4;
-            const xh_0: u8 = @intCast((qh >> @as(u5, @intCast(j))) & 1);
-            const xh_1: u8 = @intCast((qh >> @as(u5, @intCast(j + 16))) & 1);
-            dq[j] = @floatFromInt(@as(i8, @intCast(@as(u8, lo_nib | (xh_0 << 4)))) - @as(i8, 16));
-            dq[j + 16] = @floatFromInt(@as(i8, @intCast(@as(u8, hi_nib | (xh_1 << 4)))) - @as(i8, 16));
+        // Vector byte load: grab all 16 packed bytes at once
+        const bytes: @Vector(16, u8) = block[6..22].*;
+        const mask_lo: @Vector(16, u8) = @splat(0x0F);
+
+        // Extract all 16 low nibbles simultaneously (vector AND)
+        const lo_nibs = bytes & mask_lo;
+        // Extract all 16 high nibbles simultaneously (vector shift)
+        const hi_nibs = bytes >> @splat(4);
+
+        // Now process in chunks of 4 for f32 conversion + accumulate
+        var acc: @Vector(4, f32) = @splat(0);
+
+        inline for (0..4) |chunk| {
+            const off = chunk * 4;
+
+            // Low nibble weights (indices off..off+3)
+            const w_lo = @Vector(4, f32){
+                @floatFromInt(@as(i16, lo_nibs[off] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off))) & 1)) << 4)) - 16),
+                @floatFromInt(@as(i16, lo_nibs[off + 1] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 1))) & 1)) << 4)) - 16),
+                @floatFromInt(@as(i16, lo_nibs[off + 2] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 2))) & 1)) << 4)) - 16),
+                @floatFromInt(@as(i16, lo_nibs[off + 3] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 3))) & 1)) << 4)) - 16),
+            };
+
+            // High nibble weights (indices off+16..off+19)
+            const w_hi = @Vector(4, f32){
+                @floatFromInt(@as(i16, hi_nibs[off] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 16))) & 1)) << 4)) - 16),
+                @floatFromInt(@as(i16, hi_nibs[off + 1] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 17))) & 1)) << 4)) - 16),
+                @floatFromInt(@as(i16, hi_nibs[off + 2] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 18))) & 1)) << 4)) - 16),
+                @floatFromInt(@as(i16, hi_nibs[off + 3] | (@as(u8, @intCast((qh >> @as(u5, @intCast(off + 19))) & 1)) << 4)) - 16),
+            };
+
+            acc += w_lo * @as(@Vector(4, f32), xb[off..][0..4].*);
+            acc += w_hi * @as(@Vector(4, f32), xb[off + 16 ..][0..4].*);
         }
 
-        // SIMD dot product: 4-way unrolled
-        const V = 4;
-        var acc0: @Vector(V, f32) = @splat(0);
-        var acc1: @Vector(V, f32) = @splat(0);
-        var acc2: @Vector(V, f32) = @splat(0);
-        var acc3: @Vector(V, f32) = @splat(0);
-
-        acc0 += @as(@Vector(V, f32), dq[0..4].*) * @as(@Vector(V, f32), xb[0..4].*);
-        acc1 += @as(@Vector(V, f32), dq[4..8].*) * @as(@Vector(V, f32), xb[4..8].*);
-        acc2 += @as(@Vector(V, f32), dq[8..12].*) * @as(@Vector(V, f32), xb[8..12].*);
-        acc3 += @as(@Vector(V, f32), dq[12..16].*) * @as(@Vector(V, f32), xb[12..16].*);
-
-        acc0 += @as(@Vector(V, f32), dq[16..20].*) * @as(@Vector(V, f32), xb[16..20].*);
-        acc1 += @as(@Vector(V, f32), dq[20..24].*) * @as(@Vector(V, f32), xb[20..24].*);
-        acc2 += @as(@Vector(V, f32), dq[24..28].*) * @as(@Vector(V, f32), xb[24..28].*);
-        acc3 += @as(@Vector(V, f32), dq[28..32].*) * @as(@Vector(V, f32), xb[28..32].*);
-
-        total += d * @reduce(.Add, acc0 + acc1 + acc2 + acc3);
+        total += d * @reduce(.Add, acc);
     }
     return total;
 }
@@ -106,6 +131,7 @@ pub fn dotQ5_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
 // ── Q8_0: 8-bit quantization ─────────────────────────────────────
 // Block: [f16 scale (2)] [32 int8 values] = 34 bytes
 
+/// Q8_0 fused dot product — process 4 int8 values at a time with @Vector.
 pub fn dotQ8_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
     const BS: usize = 32;
     const BB: usize = 34;
@@ -117,12 +143,29 @@ pub fn dotQ8_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
         const d = f16ToF32(readU16LE(block, 0));
         const xb = x[block_idx * BS ..];
 
-        var sum: f32 = 0;
-        for (0..32) |j| {
-            const q: i8 = @bitCast(block[2 + j]);
-            sum += @as(f32, @floatFromInt(q)) * xb[j];
+        // Process 4 int8 values at a time
+        var acc0: @Vector(4, f32) = @splat(0);
+        var acc1: @Vector(4, f32) = @splat(0);
+
+        inline for (0..4) |chunk| {
+            const off = chunk * 8;
+            const q = @Vector(4, f32){
+                @floatFromInt(@as(i8, @bitCast(block[2 + off]))),
+                @floatFromInt(@as(i8, @bitCast(block[2 + off + 1]))),
+                @floatFromInt(@as(i8, @bitCast(block[2 + off + 2]))),
+                @floatFromInt(@as(i8, @bitCast(block[2 + off + 3]))),
+            };
+            const q2 = @Vector(4, f32){
+                @floatFromInt(@as(i8, @bitCast(block[2 + off + 4]))),
+                @floatFromInt(@as(i8, @bitCast(block[2 + off + 5]))),
+                @floatFromInt(@as(i8, @bitCast(block[2 + off + 6]))),
+                @floatFromInt(@as(i8, @bitCast(block[2 + off + 7]))),
+            };
+            acc0 += q * @as(@Vector(4, f32), xb[off..][0..4].*);
+            acc1 += q2 * @as(@Vector(4, f32), xb[off + 4 ..][0..4].*);
         }
-        total += d * sum;
+
+        total += d * (@reduce(.Add, acc0) + @reduce(.Add, acc1));
     }
     return total;
 }

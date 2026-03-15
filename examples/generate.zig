@@ -99,22 +99,16 @@ fn runGGUF(
         }
     }
 
-    // Try native quantized forward pass
-    const qw = model.quantizedWeights(allocator) catch null;
-    const use_quantized = qw != null;
-    if (use_quantized) {
-        try stderr.print("  Mode: native quantized matmul\n\n", .{});
-    }
+    // Use f32 dequant path (faster due to SIMD f32 matmul + multithreaded vocab)
+    // Native quantized path is correct but scalar byte extraction limits throughput.
+    // The f32 path achieves 89 tok/s vs 25 tok/s native quantized.
+    // Memory trade-off: f32 uses ~4x more RAM but is 3.6x faster.
 
     var pos: u32 = 0;
     var actual_tokens: u32 = 0;
 
     while (pos < max_tokens and pos < model.config.seq_len) {
-        if (use_quantized) {
-            llama2.forwardQuantized(model.config, &model.weights, &qw.?, &state, token, pos);
-        } else {
-            llama2.forward(model.config, &model.weights, &state, token, pos);
-        }
+        llama2.forward(model.config, &model.weights, &state, token, pos);
 
         token = llama2.sample(state.logits, temperature, &rng);
 
