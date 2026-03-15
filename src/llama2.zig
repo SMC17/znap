@@ -257,6 +257,14 @@ pub const QuantizedLayer = struct {
     w1: QuantizedTensor,
     w2: QuantizedTensor,
     w3: QuantizedTensor,
+    // Pre-dequanted i8 weight caches for SDOT (null = not cached)
+    wq_i8: ?[]i8 = null,
+    wk_i8: ?[]i8 = null,
+    wv_i8: ?[]i8 = null,
+    wo_i8: ?[]i8 = null,
+    w1_i8: ?[]i8 = null,
+    w2_i8: ?[]i8 = null,
+    w3_i8: ?[]i8 = null,
 };
 
 pub const QuantizedWeights = struct {
@@ -269,12 +277,39 @@ pub const QuantizedWeights = struct {
 
 const quant_matmul = @import("quant_matmul.zig");
 
-/// Matrix-vector multiply using raw quantized data (no dequantization).
+/// Matrix-vector multiply using raw quantized data.
+/// When i8_cache is available, uses SDOT (fastest path).
+/// Otherwise falls back to per-row scalar dequant.
 fn matmulRaw(out: []f32, x: []const f32, raw_data: []const u8, n_cols: usize, tensor_type: u32) void {
     const n_rows = out.len;
+
+    // SDOT path for Q5_0 and Q8_0 on ARM (even without i8 cache)
+    if (@import("builtin").cpu.arch == .aarch64) {
+        switch (tensor_type) {
+            6 => return sdot_mm.matmulQ5_0(raw_data, x, out, n_cols, n_rows),
+            8 => return sdot_mm.matmulQ8_0(raw_data, x, out, n_cols, n_rows),
+            else => {},
+        }
+    }
+
     const rb = quant_matmul.rowBytes(n_cols, tensor_type);
     for (0..n_rows) |i| {
         out[i] = quant_matmul.dotQuantizedRow(raw_data[i * rb ..][0..rb], x[0..n_cols], n_cols, tensor_type);
+    }
+}
+
+/// Cached SDOT matmul — uses pre-dequanted i8 weights.
+fn matmulRawCached(out: []f32, x: []const f32, raw_data: []const u8, i8_cache: []const i8, n_cols: usize, tensor_type: u32) void {
+    const n_rows = out.len;
+    const w_block_bytes: usize = switch (tensor_type) {
+        6 => 22, // Q5_0
+        8 => 34, // Q8_0
+        else => 0,
+    };
+    if (w_block_bytes > 0 and @import("builtin").cpu.arch == .aarch64) {
+        sdot_mm.matmulSdotCached(i8_cache, raw_data, x, out, n_cols, n_rows, w_block_bytes);
+    } else {
+        matmulRaw(out, x, raw_data, n_cols, tensor_type);
     }
 }
 
@@ -588,9 +623,17 @@ pub fn forwardQuantized(
         // Attention RMSNorm (f32)
         rmsNorm(state.xb, state.x, weights.rms_att_weight[l * dim .. (l + 1) * dim]);
 
-        // QKV projections — NATIVE QUANTIZED (the main speedup)
-        matmulRaw(state.q, state.xb, ql.wq.raw, ql.wq.n_cols, ql.wq.tensor_type);
-        matmulRaw(state.k, state.xb, ql.wk.raw, ql.wk.n_cols, ql.wk.tensor_type);
+        // QKV projections — uses cached i8 + SDOT when available
+        if (ql.wq_i8) |i8_data| {
+            matmulRawCached(state.q, state.xb, ql.wq.raw, i8_data, ql.wq.n_cols, ql.wq.tensor_type);
+        } else {
+            matmulRaw(state.q, state.xb, ql.wq.raw, ql.wq.n_cols, ql.wq.tensor_type);
+        }
+        if (ql.wk_i8) |i8_data| {
+            matmulRawCached(state.k, state.xb, ql.wk.raw, i8_data, ql.wk.n_cols, ql.wk.tensor_type);
+        } else {
+            matmulRaw(state.k, state.xb, ql.wk.raw, ql.wk.n_cols, ql.wk.tensor_type);
+        }
         matmulRaw(state.v, state.xb, ql.wv.raw, ql.wv.n_cols, ql.wv.tensor_type);
 
         // RoPE (same as f32 path)
@@ -651,14 +694,26 @@ pub fn forwardQuantized(
             }
         }
 
-        // Output projection — NATIVE QUANTIZED
-        matmulRaw(state.xb2, state.xb, ql.wo.raw, ql.wo.n_cols, ql.wo.tensor_type);
+        // Output projection
+        if (ql.wo_i8) |i8_data| {
+            matmulRawCached(state.xb2, state.xb, ql.wo.raw, i8_data, ql.wo.n_cols, ql.wo.tensor_type);
+        } else {
+            matmulRaw(state.xb2, state.xb, ql.wo.raw, ql.wo.n_cols, ql.wo.tensor_type);
+        }
         for (0..dim) |i| state.x[i] += state.xb2[i];
 
         // FFN
         rmsNorm(state.xb, state.x, weights.rms_ffn_weight[l * dim .. (l + 1) * dim]);
-        matmulRaw(state.hb, state.xb, ql.w1.raw, ql.w1.n_cols, ql.w1.tensor_type);
-        matmulRaw(state.hb2, state.xb, ql.w3.raw, ql.w3.n_cols, ql.w3.tensor_type);
+        if (ql.w1_i8) |i8_data| {
+            matmulRawCached(state.hb, state.xb, ql.w1.raw, i8_data, ql.w1.n_cols, ql.w1.tensor_type);
+        } else {
+            matmulRaw(state.hb, state.xb, ql.w1.raw, ql.w1.n_cols, ql.w1.tensor_type);
+        }
+        if (ql.w3_i8) |i8_data| {
+            matmulRawCached(state.hb2, state.xb, ql.w3.raw, i8_data, ql.w3.n_cols, ql.w3.tensor_type);
+        } else {
+            matmulRaw(state.hb2, state.xb, ql.w3.raw, ql.w3.n_cols, ql.w3.tensor_type);
+        }
 
         // SwiGLU
         for (0..hidden_dim) |i| {
@@ -1310,6 +1365,35 @@ pub const GGUFModel = struct {
         }
     }
 
+    /// Pre-dequantize Q5_0 tensor to i8 (one-time cost at load).
+    fn predequantQ5_0(qt: QuantizedTensor, allocator: std.mem.Allocator) ![]i8 {
+        const n_cols = qt.n_cols;
+        const n_blocks_per_row = n_cols / 32;
+        const row_bytes = n_blocks_per_row * 22;
+        const n_rows = qt.raw.len / row_bytes;
+        const total_elements = n_rows * n_cols;
+
+        var data = try allocator.alloc(i8, total_elements);
+
+        for (0..n_rows) |i| {
+            const raw_row = qt.raw[i * row_bytes ..];
+            for (0..n_blocks_per_row) |b| {
+                const block = raw_row[b * 22 ..];
+                const qh = @as(u32, block[2]) | (@as(u32, block[3]) << 8) |
+                    (@as(u32, block[4]) << 16) | (@as(u32, block[5]) << 24);
+                for (0..16) |j| {
+                    const byte = block[6 + j];
+                    const xh_lo: u8 = @intCast((qh >> @as(u5, @intCast(j))) & 1);
+                    const xh_hi: u8 = @intCast((qh >> @as(u5, @intCast(j + 16))) & 1);
+                    data[i * n_cols + b * 32 + j] = @intCast(@as(i16, (byte & 0xF) | (xh_lo << 4)) - 16);
+                    data[i * n_cols + b * 32 + j + 16] = @intCast(@as(i16, (byte >> 4) | (xh_hi << 4)) - 16);
+                }
+            }
+        }
+
+        return data;
+    }
+
     /// Get raw tensor data + metadata from the GGUF file by name.
     fn getQuantizedTensor(gf: *const gguf_mod.GGUFFile, name: []const u8) ?QuantizedTensor {
         const info = gf.getTensorInfo(name) orelse return null;
@@ -1340,14 +1424,30 @@ pub const GGUFModel = struct {
             var buf_w2: [64]u8 = undefined;
             var buf_w3: [64]u8 = undefined;
 
+            const qt_wq = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wq, "blk.{d}.attn_q.weight", .{l})) orelse return null;
+            const qt_wk = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wk, "blk.{d}.attn_k.weight", .{l})) orelse return null;
+            const qt_wv = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wv, "blk.{d}.attn_v.weight", .{l})) orelse return null;
+            const qt_wo = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wo, "blk.{d}.attn_output.weight", .{l})) orelse return null;
+            const qt_w1 = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_w1, "blk.{d}.ffn_gate.weight", .{l})) orelse return null;
+            const qt_w2 = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_w2, "blk.{d}.ffn_down.weight", .{l})) orelse return null;
+            const qt_w3 = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_w3, "blk.{d}.ffn_up.weight", .{l})) orelse return null;
+
+            // Pre-dequant Q5_0 weights to i8 for SDOT (one-time cost at load)
             layers[l] = .{
-                .wq = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wq, "blk.{d}.attn_q.weight", .{l})) orelse return null,
-                .wk = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wk, "blk.{d}.attn_k.weight", .{l})) orelse return null,
-                .wv = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wv, "blk.{d}.attn_v.weight", .{l})) orelse return null,
-                .wo = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_wo, "blk.{d}.attn_output.weight", .{l})) orelse return null,
-                .w1 = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_w1, "blk.{d}.ffn_gate.weight", .{l})) orelse return null,
-                .w2 = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_w2, "blk.{d}.ffn_down.weight", .{l})) orelse return null,
-                .w3 = getQuantizedTensor(gf, try std.fmt.bufPrint(&buf_w3, "blk.{d}.ffn_up.weight", .{l})) orelse return null,
+                .wq = qt_wq,
+                .wk = qt_wk,
+                .wv = qt_wv,
+                .wo = qt_wo,
+                .w1 = qt_w1,
+                .w2 = qt_w2,
+                .w3 = qt_w3,
+                .wq_i8 = if (qt_wq.tensor_type == 6) try predequantQ5_0(qt_wq, allocator) else null,
+                .wk_i8 = if (qt_wk.tensor_type == 6) try predequantQ5_0(qt_wk, allocator) else null,
+                .wv_i8 = null, // Q8_0, no dequant needed
+                .wo_i8 = if (qt_wo.tensor_type == 6) try predequantQ5_0(qt_wo, allocator) else null,
+                .w1_i8 = if (qt_w1.tensor_type == 6) try predequantQ5_0(qt_w1, allocator) else null,
+                .w2_i8 = null, // Q6_K, handled separately
+                .w3_i8 = if (qt_w3.tensor_type == 6) try predequantQ5_0(qt_w3, allocator) else null,
             };
         }
 
