@@ -20,6 +20,9 @@ pub const replay = @import("replay.zig");
 pub const parallel = @import("parallel.zig");
 pub const attention = @import("attention.zig");
 pub const transformer = @import("transformer.zig");
+pub const weights = @import("weights.zig");
+pub const tokenizer = @import("tokenizer.zig");
+pub const train = @import("train.zig");
 
 // Re-export core types
 pub const Tensor = tensor.Tensor;
@@ -55,6 +58,14 @@ pub const applyRoPE = attention.applyRoPE;
 pub const topKSample = attention.topKSample;
 pub const greedySample = attention.greedySample;
 
+// Weights I/O
+pub const loadLinearPolicy = weights.loadLinearPolicy;
+pub const loadDQNPolicy = weights.loadDQNPolicy;
+pub const loadTransformer = weights.loadTransformer;
+pub const loadTensorFromSlice = weights.loadTensorFromSlice;
+pub const saveLinearPolicy = weights.saveLinearPolicy;
+pub const saveDQNPolicy = weights.saveDQNPolicy;
+
 // ── Library metadata ─────────────────────────────────────────────
 
 pub const version = "0.1.0";
@@ -71,4 +82,7 @@ test {
     _ = parallel;
     _ = attention;
     _ = transformer;
+    _ = weights;
+    _ = tokenizer;
+    _ = train;
 }

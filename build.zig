@@ -50,6 +50,19 @@ pub fn build(b: *std.Build) void {
     const example_step = b.step("example", "Run the RL agent example");
     example_step.dependOn(&run_example.step);
 
+    const train_example = b.addExecutable(.{
+        .name = "train-and-generate",
+        .root_source_file = b.path("examples/train_and_generate.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    train_example.root_module.addImport("znap", lib.root_module);
+    b.installArtifact(train_example);
+
+    const run_train = b.addRunArtifact(train_example);
+    const train_step = b.step("train", "Train a tiny model and generate text");
+    train_step.dependOn(&run_train.step);
+
     // ── Tests ────────────────────────────────────────────────────
     const test_files = [_][]const u8{
         "src/tensor.zig",
@@ -60,6 +73,9 @@ pub fn build(b: *std.Build) void {
         "src/parallel.zig",
         "src/attention.zig",
         "src/transformer.zig",
+        "src/weights.zig",
+        "src/tokenizer.zig",
+        "src/train.zig",
         "src/znap.zig",
     };
 
