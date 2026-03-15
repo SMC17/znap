@@ -66,29 +66,39 @@ pub fn dotQ5_0(raw_row: []const u8, x: []const f32, n: usize) f32 {
     while (block_idx * BS < n) : (block_idx += 1) {
         const block = raw_row[block_idx * BB ..][0..BB];
         const d = f16ToF32(readU16LE(block, 0));
-        const qh = readU32LE(block, 2); // 32 high bits
+        const qh = readU32LE(block, 2);
         const xb = x[block_idx * BS ..];
 
-        var sum: f32 = 0;
-
+        // Dequantize 32 weights into a temporary buffer, then SIMD dot product
+        var dq: [32]f32 = undefined;
         for (0..16) |j| {
             const byte = block[6 + j];
             const lo_nib: u8 = byte & 0xF;
             const hi_nib: u8 = byte >> 4;
-
-            // Extract high bits — matches ggml exactly:
-            // bit j for low nibble (weight j), bit j+16 for high nibble (weight j+16)
             const xh_0: u8 = @intCast((qh >> @as(u5, @intCast(j))) & 1);
             const xh_1: u8 = @intCast((qh >> @as(u5, @intCast(j + 16))) & 1);
-
-            // 5-bit values, subtract 16 bias (same as ggml's cast-to-int8 trick)
-            const val0: f32 = @floatFromInt(@as(i8, @intCast(@as(u8, lo_nib | (xh_0 << 4)))) - @as(i8, 16));
-            const val1: f32 = @floatFromInt(@as(i8, @intCast(@as(u8, hi_nib | (xh_1 << 4)))) - @as(i8, 16));
-
-            // ggml layout: low nibble -> weight j (0..15), high nibble -> weight j+16 (16..31)
-            sum += val0 * xb[j] + val1 * xb[j + 16];
+            dq[j] = @floatFromInt(@as(i8, @intCast(@as(u8, lo_nib | (xh_0 << 4)))) - @as(i8, 16));
+            dq[j + 16] = @floatFromInt(@as(i8, @intCast(@as(u8, hi_nib | (xh_1 << 4)))) - @as(i8, 16));
         }
-        total += d * sum;
+
+        // SIMD dot product: 4-way unrolled
+        const V = 4;
+        var acc0: @Vector(V, f32) = @splat(0);
+        var acc1: @Vector(V, f32) = @splat(0);
+        var acc2: @Vector(V, f32) = @splat(0);
+        var acc3: @Vector(V, f32) = @splat(0);
+
+        acc0 += @as(@Vector(V, f32), dq[0..4].*) * @as(@Vector(V, f32), xb[0..4].*);
+        acc1 += @as(@Vector(V, f32), dq[4..8].*) * @as(@Vector(V, f32), xb[4..8].*);
+        acc2 += @as(@Vector(V, f32), dq[8..12].*) * @as(@Vector(V, f32), xb[8..12].*);
+        acc3 += @as(@Vector(V, f32), dq[12..16].*) * @as(@Vector(V, f32), xb[12..16].*);
+
+        acc0 += @as(@Vector(V, f32), dq[16..20].*) * @as(@Vector(V, f32), xb[16..20].*);
+        acc1 += @as(@Vector(V, f32), dq[20..24].*) * @as(@Vector(V, f32), xb[20..24].*);
+        acc2 += @as(@Vector(V, f32), dq[24..28].*) * @as(@Vector(V, f32), xb[24..28].*);
+        acc3 += @as(@Vector(V, f32), dq[28..32].*) * @as(@Vector(V, f32), xb[28..32].*);
+
+        total += d * @reduce(.Add, acc0 + acc1 + acc2 + acc3);
     }
     return total;
 }
@@ -263,8 +273,42 @@ pub fn dotQ4_K(raw_row: []const u8, x: []const f32, n: usize) f32 {
 
 // ── Dispatch ─────────────────────────────────────────────────────
 
+/// Compute a single row's dot product based on tensor type.
+fn dotQuantizedRow(row_data: []const u8, x: []const f32, n_cols: usize, tensor_type: u32) f32 {
+    return switch (tensor_type) {
+        2 => dotQ4_0(row_data, x, n_cols),
+        6 => dotQ5_0(row_data, x, n_cols),
+        8 => dotQ8_0(row_data, x, n_cols),
+        12 => dotQ4_K(row_data, x, n_cols),
+        14 => dotQ6_K(row_data, x, n_cols),
+        else => blk: {
+            var sum: f32 = 0;
+            const f32_row: [*]const f32 = @ptrCast(@alignCast(row_data.ptr));
+            for (0..n_cols) |j| sum += f32_row[j] * x[j];
+            break :blk sum;
+        },
+    };
+}
+
+const QuantWork = struct {
+    raw_weights: []const u8,
+    x: []const f32,
+    out: []f32,
+    n_cols: usize,
+    rb: usize,
+    tensor_type: u32,
+    start: usize,
+    end: usize,
+};
+
+fn quantWorker(w: QuantWork) void {
+    for (w.start..w.end) |i| {
+        w.out[i] = dotQuantizedRow(w.raw_weights[i * w.rb ..][0..w.rb], w.x[0..w.n_cols], w.n_cols, w.tensor_type);
+    }
+}
+
 /// Matrix-vector multiply dispatching to the correct quantized kernel.
-/// Tensor types: 0=F32, 1=F16, 2=Q4_0, 6=Q5_0, 7=Q5_1, 8=Q8_0, 12=Q4_K, 14=Q6_K
+/// Multithreaded for large output dimensions.
 pub fn matmulQuantized(
     raw_weights: []const u8,
     x: []const f32,
@@ -273,24 +317,36 @@ pub fn matmulQuantized(
     n_rows: usize,
     tensor_type: u32,
 ) void {
-    const row_bytes = rowBytes(n_cols, tensor_type);
+    const rb = rowBytes(n_cols, tensor_type);
+
+    // Multithread for large matmuls (FFN hidden dim = 1536)
+    if (n_rows >= 192) {
+        const n_threads = @min(std.Thread.getCpuCount() catch 1, 8);
+        if (n_threads > 1) {
+            const rows_per_thread = n_rows / n_threads;
+            var threads: [8]std.Thread = undefined;
+            var spawned: usize = 0;
+
+            for (0..n_threads) |t| {
+                const start = t * rows_per_thread;
+                const end = if (t == n_threads - 1) n_rows else (t + 1) * rows_per_thread;
+                threads[t] = std.Thread.spawn(.{}, quantWorker, .{QuantWork{
+                    .raw_weights = raw_weights, .x = x, .out = out,
+                    .n_cols = n_cols, .rb = rb, .tensor_type = tensor_type,
+                    .start = start, .end = end,
+                }}) catch {
+                    quantWorker(.{ .raw_weights = raw_weights, .x = x, .out = out, .n_cols = n_cols, .rb = rb, .tensor_type = tensor_type, .start = start, .end = end });
+                    continue;
+                };
+                spawned += 1;
+            }
+            for (0..spawned) |t| threads[t].join();
+            return;
+        }
+    }
 
     for (0..n_rows) |i| {
-        const row_data = raw_weights[i * row_bytes ..][0..row_bytes];
-        out[i] = switch (tensor_type) {
-            2 => dotQ4_0(row_data, x[0..n_cols], n_cols),
-            6 => dotQ5_0(row_data, x[0..n_cols], n_cols),
-            8 => dotQ8_0(row_data, x[0..n_cols], n_cols),
-            12 => dotQ4_K(row_data, x[0..n_cols], n_cols),
-            14 => dotQ6_K(row_data, x[0..n_cols], n_cols),
-            else => blk: {
-                // F32 fallback
-                var sum: f32 = 0;
-                const f32_row: [*]const f32 = @ptrCast(@alignCast(row_data.ptr));
-                for (0..n_cols) |j| sum += f32_row[j] * x[j];
-                break :blk sum;
-            },
-        };
+        out[i] = dotQuantizedRow(raw_weights[i * rb ..][0..rb], x[0..n_cols], n_cols, tensor_type);
     }
 }
 
