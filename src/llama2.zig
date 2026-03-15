@@ -257,7 +257,7 @@ pub const QuantizedLayer = struct {
     w1: QuantizedTensor,
     w2: QuantizedTensor,
     w3: QuantizedTensor,
-    // Pre-dequanted i8 weight caches for SDOT (null = not cached)
+    // Pre-dequanted i8 weight caches for SDOT
     wq_i8: ?[]i8 = null,
     wk_i8: ?[]i8 = null,
     wv_i8: ?[]i8 = null,
@@ -265,6 +265,14 @@ pub const QuantizedLayer = struct {
     w1_i8: ?[]i8 = null,
     w2_i8: ?[]i8 = null,
     w3_i8: ?[]i8 = null,
+    // Pre-cached per-block scales (avoids reading raw block headers during inference)
+    wq_scales: ?[]f32 = null,
+    wk_scales: ?[]f32 = null,
+    wv_scales: ?[]f32 = null,
+    wo_scales: ?[]f32 = null,
+    w1_scales: ?[]f32 = null,
+    w2_scales: ?[]f32 = null,
+    w3_scales: ?[]f32 = null,
 };
 
 pub const QuantizedWeights = struct {
@@ -295,6 +303,23 @@ fn matmulRaw(out: []f32, x: []const f32, raw_data: []const u8, n_cols: usize, te
     const rb = quant_matmul.rowBytes(n_cols, tensor_type);
     for (0..n_rows) |i| {
         out[i] = quant_matmul.dotQuantizedRow(raw_data[i * rb ..][0..rb], x[0..n_cols], n_cols, tensor_type);
+    }
+}
+
+/// Dispatch with pre-quantized Q8_0 input (skip redundant quantization).
+fn cachedOrRawPrequant(out: []f32, qt: QuantizedTensor, i8_cache: ?[]i8, q8_input: []const sdot_mm.Q8Block) void {
+    const n_rows = out.len;
+    const n_cols = qt.n_cols;
+    const w_bb: usize = switch (qt.tensor_type) {
+        6 => 22, 8 => 34, 14 => 210, 12 => 144, else => 0,
+    };
+    if (i8_cache != null and w_bb > 0) {
+        sdot_mm.matmulSdotPrequant(i8_cache.?, qt.raw, q8_input, out, n_cols, n_rows, w_bb);
+    } else {
+        const rb = quant_matmul.rowBytes(n_cols, qt.tensor_type);
+        for (0..n_rows) |i| {
+            out[i] = quant_matmul.dotQuantizedRow(qt.raw[i * rb ..][0..rb], @as([]const f32, &.{}), n_cols, qt.tensor_type);
+        }
     }
 }
 
@@ -632,10 +657,14 @@ pub fn forwardQuantized(
         // Attention RMSNorm (f32)
         rmsNorm(state.xb, state.x, weights.rms_att_weight[l * dim .. (l + 1) * dim]);
 
-        // QKV projections — uses cached i8 + SDOT for all types
-        cachedOrRaw(state.q, state.xb, ql.wq, ql.wq_i8);
-        cachedOrRaw(state.k, state.xb, ql.wk, ql.wk_i8);
-        cachedOrRaw(state.v, state.xb, ql.wv, ql.wv_i8);
+        // Pre-quantize input to Q8_0 ONCE for QKV (same input, 3 matmuls)
+        var q8_attn: [256]sdot_mm.Q8Block = undefined;
+        sdot_mm.quantizeToQ8_0(state.xb[0..dim], q8_attn[0 .. dim / 32], dim);
+
+        // QKV projections — uses pre-quantized input (no redundant Q8_0 quantization)
+        cachedOrRawPrequant(state.q, ql.wq, ql.wq_i8, q8_attn[0 .. dim / 32]);
+        cachedOrRawPrequant(state.k, ql.wk, ql.wk_i8, q8_attn[0 .. dim / 32]);
+        cachedOrRawPrequant(state.v, ql.wv, ql.wv_i8, q8_attn[0 .. dim / 32]);
 
         // RoPE (same as f32 path)
         for (0..n_heads) |h| {
@@ -695,20 +724,26 @@ pub fn forwardQuantized(
             }
         }
 
-        // Output projection
+        // Output projection (xb is the attention output — different from attn input)
         cachedOrRaw(state.xb2, state.xb, ql.wo, ql.wo_i8);
         for (0..dim) |i| state.x[i] += state.xb2[i];
 
-        // FFN
+        // FFN norm
         rmsNorm(state.xb, state.x, weights.rms_ffn_weight[l * dim .. (l + 1) * dim]);
-        cachedOrRaw(state.hb, state.xb, ql.w1, ql.w1_i8);
-        cachedOrRaw(state.hb2, state.xb, ql.w3, ql.w3_i8);
+
+        // Pre-quantize FFN input ONCE for w1/w3 (same input, 2 matmuls)
+        var q8_ffn: [256]sdot_mm.Q8Block = undefined;
+        sdot_mm.quantizeToQ8_0(state.xb[0..dim], q8_ffn[0 .. dim / 32], dim);
+
+        cachedOrRawPrequant(state.hb, ql.w1, ql.w1_i8, q8_ffn[0 .. dim / 32]);
+        cachedOrRawPrequant(state.hb2, ql.w3, ql.w3_i8, q8_ffn[0 .. dim / 32]);
 
         // SwiGLU
         for (0..hidden_dim) |i| {
             state.hb[i] = state.hb[i] * (1.0 / (1.0 + @exp(-state.hb[i]))) * state.hb2[i];
         }
 
+        // w2 input is different (hb after SwiGLU) — can't reuse FFN q8
         cachedOrRaw(state.xb, state.hb, ql.w2, ql.w2_i8);
         for (0..dim) |i| state.x[i] += state.xb[i];
     }
