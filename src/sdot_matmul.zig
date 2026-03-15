@@ -49,8 +49,6 @@ pub fn quantizeToQ8_0(x: []const f32, blocks: []Q8Block, n: usize) void {
 }
 
 /// SDOT: 32-element i8×i8 dot product → i32.
-/// On ARM: 2 SDOT instructions process all 32 elements.
-/// On non-ARM: scalar fallback.
 fn sdotBlock(w: [*]const i8, x: [*]const i8) i32 {
     if (builtin.cpu.arch != .aarch64) {
         var sum: i32 = 0;
@@ -73,6 +71,85 @@ fn sdotBlock(w: [*]const i8, x: [*]const i8) i32 {
         : [w] "{x0}" (w),
           [x] "{x1}" (x),
         : "v0", "v1", "v2", "v3", "v4"
+    );
+    return result;
+}
+
+/// Full row SDOT with inline scale handling — NO per-block function call.
+/// Processes n_blocks × 32 weights with per-block f16 scale and per-block Q8_0 input scale.
+/// All in one asm invocation.
+fn sdotRowQ5(
+    w_row: [*]const i8,
+    w_raw: [*]const u8, // Original Q5_0/Q8_0 blocks (for scales)
+    q8_blocks: [*]const Q8Block,
+    n_blocks: usize,
+    w_block_bytes: usize,
+) f32 {
+    if (builtin.cpu.arch != .aarch64) {
+        var total: f32 = 0;
+        for (0..n_blocks) |b| {
+            const block = w_raw[b * w_block_bytes ..];
+            const ws: f32 = @floatCast(@as(f16, @bitCast(@as(u16, block[0]) | (@as(u16, block[1]) << 8))));
+            const dot = sdotBlock(w_row + b * 32, &q8_blocks[b].values);
+            total += ws * q8_blocks[b].scale * @as(f32, @floatFromInt(dot));
+        }
+        return total;
+    }
+
+    // NEON assembly: process all blocks with inline scale handling
+    var result: f32 = undefined;
+    asm volatile (
+        // x0 = w_row (i8 weights), x1 = w_raw (Q5_0 blocks for scales)
+        // x2 = q8_blocks, x3 = n_blocks, x4 = w_block_bytes
+        \\mov x11, x0
+        \\mov x12, x1
+        \\mov x13, x2
+        \\mov x14, x3
+        \\mov x15, x4
+        \\movi v30.4s, #0
+        // Loop over blocks
+        \\1:
+        \\cbz x14, 2f
+        // Load weight scale from Q5_0 block (f16 at offset 0)
+        \\ldr h0, [x12]
+        \\fcvt s0, h0
+        // Load input scale from Q8Block (f32 at offset 0)
+        \\ldr s1, [x13]
+        // Multiply scales: combined_scale = w_scale × x_scale
+        \\fmul s0, s0, s1
+        // Load 32 i8 weights
+        \\ldr q2, [x11]
+        \\ldr q3, [x11, #16]
+        // Load 32 i8 input (at offset 4 in Q8Block — after the f32 scale)
+        \\ldr q4, [x13, #4]
+        \\ldr q5, [x13, #20]
+        // SDOT: 2 instructions, 32 multiply-accumulates
+        \\movi v6.4s, #0
+        \\sdot v6.4s, v2.16b, v4.16b
+        \\sdot v6.4s, v3.16b, v5.16b
+        // Reduce 4 i32 lanes → scalar
+        \\addv s6, v6.4s
+        // Convert i32 → f32
+        \\scvtf s6, s6
+        // Multiply by combined scale
+        \\fmul s6, s6, s0
+        // Accumulate
+        \\fadd s30, s30, s6
+        // Advance pointers
+        \\add x11, x11, #32
+        \\add x12, x12, x15
+        \\add x13, x13, #36
+        \\sub x14, x14, #1
+        \\b 1b
+        \\2:
+        \\fmov w8, s30
+        : [out] "={w8}" (result),
+        : [w] "{x0}" (w_row),
+          [raw] "{x1}" (w_raw),
+          [q8] "{x2}" (q8_blocks),
+          [nb] "{x3}" (n_blocks),
+          [bb] "{x4}" (w_block_bytes),
+        : "v0","v1","v2","v3","v4","v5","v6","v30","x11","x12","x13","x14","x15","memory"
     );
     return result;
 }
@@ -291,21 +368,14 @@ pub fn matmulSdotPrequant(
     n_rows: usize,
     w_block_bytes: usize,
 ) void {
-    // Fast path: Q5_0 (22) or Q8_0 (34) — simple per-block f16 scale
+    // Fast path: Q5_0 (22) or Q8_0 (34) — full row assembly, no per-block function call
     if (w_block_bytes == 22 or w_block_bytes == 34) {
         const n_blocks = n_cols / 32;
         for (0..n_rows) |i| {
-            const w_row = w_data[i * n_cols ..];
-            const raw_row = w_raw[i * n_blocks * w_block_bytes ..];
-            var total: f32 = 0;
-            for (0..n_blocks) |b| {
-                const block = raw_row[b * w_block_bytes ..];
-                const w_scale: f32 = @floatCast(@as(f16, @bitCast(@as(u16, block[0]) | (@as(u16, block[1]) << 8))));
-                const w_ptr: [*]const i8 = @ptrCast(w_row[b * 32 ..].ptr);
-                const dot = sdotBlock(w_ptr, &q8_blocks[b].values);
-                total += w_scale * q8_blocks[b].scale * @as(f32, @floatFromInt(dot));
-            }
-            out[i] = total;
+            const w_row: [*]const i8 = @ptrCast(w_data[i * n_cols ..].ptr);
+            const raw_row: [*]const u8 = w_raw.ptr + i * n_blocks * w_block_bytes;
+            const q8_ptr: [*]const Q8Block = q8_blocks.ptr;
+            out[i] = sdotRowQ5(w_row, raw_row, q8_ptr, n_blocks, w_block_bytes);
         }
         return;
     }
