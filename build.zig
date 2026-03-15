@@ -62,6 +62,32 @@ pub fn build(b: *std.Build) void {
     const scaling_step = b.step("scaling", "Run scaling law experiment across 7 model sizes");
     scaling_step.dependOn(&run_scaling.step);
 
+    const crossover_exe = b.addExecutable(.{
+        .name = "znap-dqn-crossover",
+        .root_source_file = b.path("benchmarks/dqn_crossover.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    crossover_exe.root_module.addImport("znap", lib.root_module);
+    b.installArtifact(crossover_exe);
+
+    const run_crossover = b.addRunArtifact(crossover_exe);
+    const crossover_step = b.step("dqn-crossover", "DQN ternary quantization crossover experiment");
+    crossover_step.dependOn(&run_crossover.step);
+
+    const qat_exe = b.addExecutable(.{
+        .name = "znap-qat",
+        .root_source_file = b.path("benchmarks/qat.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    qat_exe.root_module.addImport("znap", lib.root_module);
+    b.installArtifact(qat_exe);
+
+    const run_qat = b.addRunArtifact(qat_exe);
+    const qat_step = b.step("qat", "Quantization-aware training experiment");
+    qat_step.dependOn(&run_qat.step);
+
     // ── Examples ─────────────────────────────────────────────────
     const rl_example = b.addExecutable(.{
         .name = "rl-agent",
