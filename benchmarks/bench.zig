@@ -62,13 +62,13 @@ pub fn main() !void {
     bench("relu", 10_000_000, benchRelu);
 
     std.debug.print("\nFloat32 policy evaluation:\n", .{});
-    bench("linear {d}x{d} (bandit)", 1_000_000, benchBandit);
-    bench("DQN {d}x{d}x{d} (2-layer)", 1_000_000, benchDQN);
+    bench("linear 30x6 (bandit)", 1_000_000, benchBandit);
+    bench("DQN 30x64x6 (2-layer)", 1_000_000, benchDQN);
     bench("ensemble 7x linear", 100_000, benchEnsemble);
 
     std.debug.print("\nBitNet b1.58 quantized (integer-only inner loop):\n", .{});
-    bench("ternary linear {d}x{d}", 1_000_000, benchTernaryBandit);
-    bench("ternary DQN {d}x{d}x{d}", 1_000_000, benchTernaryDQN);
+    bench("ternary linear 30x6", 1_000_000, benchTernaryBandit);
+    bench("ternary DQN 30x64x6", 1_000_000, benchTernaryDQN);
 
     const bandit_mem = znap.policy.LinearPolicy(F, A).param_count * 4;
     const ternary_mem = znap.quantized.TernaryPolicy(F, A).memoryBytes();
