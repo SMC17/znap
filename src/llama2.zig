@@ -866,6 +866,7 @@ pub const Model = struct {
 
 pub const Tokenizer = struct {
     vocab: [][]const u8,
+    scores: []f32,
     vocab_size: u32,
     data: []const u8,
 
@@ -878,13 +879,15 @@ pub const Tokenizer = struct {
         _ = try file.readAll(data);
 
         var vocab = try allocator.alloc([]const u8, vocab_size);
+        var scores = try allocator.alloc(f32, vocab_size);
 
         // Skip max_token_length (first i32)
         var pos: usize = 4;
         for (0..vocab_size) |i| {
             if (pos + 4 > data.len) break;
             // score (f32) + len (i32) + string bytes
-            pos += 4; // skip score
+            scores[i] = @as(*const f32, @ptrCast(@alignCast(data[pos..].ptr))).*;
+            pos += 4;
             const len: u32 = @as(*const u32, @ptrCast(@alignCast(data[pos..].ptr))).*;
             pos += 4;
             if (pos + len > data.len) break;
@@ -894,6 +897,7 @@ pub const Tokenizer = struct {
 
         return .{
             .vocab = vocab,
+            .scores = scores,
             .vocab_size = vocab_size,
             .data = data,
         };
@@ -904,11 +908,226 @@ pub const Tokenizer = struct {
         return self.vocab[token];
     }
 
+    /// Look up a vocab entry by exact string match. O(vocab_size) linear
+    /// scan -- the reference llama2.c implementation sorts the vocab and
+    /// binary-searches; this trades encode() speed for not needing an
+    /// extra sorted index + allocator lifetime. Fine for one-shot prompt
+    /// encoding (called ~prompt_len times, not per generated token).
+    fn lookup(self: *const Tokenizer, str: []const u8) ?u32 {
+        for (self.vocab[0..self.vocab_size], 0..) |entry, i| {
+            if (std.mem.eql(u8, entry, str)) return @intCast(i);
+        }
+        return null;
+    }
+
+    /// Encode text into token ids using the same byte-level-init +
+    /// greedy-best-pair-merge BPE algorithm as the reference llama2.c
+    /// `encode()` (this is its tokenizer.bin format: vocab strings +
+    /// merge-priority scores, no explicit merge-rule table). Matches its
+    /// conventions: an optional leading BOS (token 1), a dummy-prefix
+    /// space token before the first real token (SentencePiece
+    /// convention), and byte-fallback for any byte sequence not in
+    /// vocab, encoded as token id `byte + 3` (ids 0-2 are reserved).
+    /// Writes at most `output.len` tokens and returns the count written.
+    pub fn encode(self: *const Tokenizer, text: []const u8, bos: bool, output: []u32) usize {
+        var n: usize = 0;
+
+        if (bos and n < output.len) {
+            output[n] = 1;
+            n += 1;
+        }
+
+        if (text.len > 0) {
+            if (n < output.len) {
+                // Dummy prefix: SentencePiece always tokenizes as if the
+                // string were preceded by a space.
+                if (self.lookup(" ")) |id| {
+                    output[n] = id;
+                    n += 1;
+                }
+            }
+
+            var str_buffer: [8]u8 = undefined;
+            var str_len: usize = 0;
+            for (text, 0..) |byte, i| {
+                str_buffer[str_len] = byte;
+                str_len += 1;
+                // Buffer UTF-8 continuation bytes (10xxxxxx) so a
+                // multi-byte codepoint is looked up as one unit.
+                const is_last = i + 1 == text.len;
+                if (!is_last and (text[i + 1] & 0xC0) == 0x80 and str_len < 4) continue;
+
+                if (n >= output.len) break;
+                if (self.lookup(str_buffer[0..str_len])) |id| {
+                    output[n] = id;
+                    n += 1;
+                } else {
+                    // Byte fallback: each raw byte becomes its own token.
+                    for (str_buffer[0..str_len]) |b| {
+                        if (n >= output.len) break;
+                        output[n] = @as(u32, b) + 3;
+                        n += 1;
+                    }
+                }
+                str_len = 0;
+            }
+        }
+
+        // Greedy merge: repeatedly find the best-scoring adjacent pair
+        // whose concatenation exists in vocab, merge it, repeat until no
+        // merge candidate remains.
+        var merge_buffer: [512]u8 = undefined;
+        while (n >= 2) {
+            var best_score: f32 = -1e10;
+            var best_id: ?u32 = null;
+            var best_idx: usize = 0;
+
+            var i: usize = 0;
+            while (i + 1 < n) : (i += 1) {
+                const left = self.vocab[output[i]];
+                const right = self.vocab[output[i + 1]];
+                if (left.len + right.len > merge_buffer.len) continue;
+                @memcpy(merge_buffer[0..left.len], left);
+                @memcpy(merge_buffer[left.len .. left.len + right.len], right);
+                const candidate = merge_buffer[0 .. left.len + right.len];
+                if (self.lookup(candidate)) |id| {
+                    if (self.scores[id] > best_score) {
+                        best_score = self.scores[id];
+                        best_id = id;
+                        best_idx = i;
+                    }
+                }
+            }
+
+            const merged_id = best_id orelse break;
+            output[best_idx] = merged_id;
+            var j = best_idx + 1;
+            while (j + 1 < n) : (j += 1) output[j] = output[j + 1];
+            n -= 1;
+        }
+
+        return n;
+    }
+
     pub fn deinit(self: *Tokenizer, allocator: std.mem.Allocator) void {
         allocator.free(self.vocab);
+        allocator.free(self.scores);
         allocator.free(self.data);
     }
 };
+
+/// Builds a synthetic vocab for encode() tests that mirrors the real
+/// tokenizer.bin format's guarantee: id 0=<unk>, 1=<s> (BOS), 2=</s>
+/// (EOS), ids 3..258 = every raw byte value 0..255 (so byte-fallback
+/// ids are always valid, same as the real 32000-entry llama2.c vocab),
+/// plus a handful of learned merges above that.
+fn testTokenizer(allocator: std.mem.Allocator) !Tokenizer {
+    var vocab: std.ArrayList([]const u8) = .empty;
+    var scores: std.ArrayList(f32) = .empty;
+
+    try vocab.append(allocator, "<unk>");
+    try scores.append(allocator, 0);
+    try vocab.append(allocator, "<s>");
+    try scores.append(allocator, 0);
+    try vocab.append(allocator, "</s>");
+    try scores.append(allocator, 0);
+
+    var byte_val: usize = 0;
+    while (byte_val < 256) : (byte_val += 1) {
+        try vocab.append(allocator, try std.fmt.allocPrint(allocator, "{c}", .{@as(u8, @intCast(byte_val))}));
+        try scores.append(allocator, -1000);
+    }
+
+    const merges = [_]struct { s: []const u8, sc: f32 }{
+        .{ .s = "he", .sc = 1.0 },
+        .{ .s = "hel", .sc = 2.0 },
+        .{ .s = "hell", .sc = 3.0 },
+        .{ .s = "hello", .sc = 4.0 },
+        .{ .s = "wo", .sc = 1.0 },
+        .{ .s = "wor", .sc = 1.5 },
+        .{ .s = "worl", .sc = 2.5 },
+        .{ .s = "world", .sc = 3.5 },
+        .{ .s = " world", .sc = 5.0 },
+    };
+    for (merges) |m| {
+        try vocab.append(allocator, m.s);
+        try scores.append(allocator, m.sc);
+    }
+
+    const vocab_size: u32 = @intCast(vocab.items.len);
+    return .{
+        .vocab = try vocab.toOwnedSlice(allocator),
+        .scores = try scores.toOwnedSlice(allocator),
+        .vocab_size = vocab_size,
+        .data = &.{},
+    };
+}
+
+test "Tokenizer.encode: empty text with bos gives just BOS" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tok = try testTokenizer(arena.allocator());
+
+    var out: [16]u32 = undefined;
+    const n = tok.encode("", true, &out);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(@as(u32, 1), out[0]);
+}
+
+test "Tokenizer.encode: word merges to a single token when vocab supports it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tok = try testTokenizer(arena.allocator());
+
+    var out: [16]u32 = undefined;
+    const n = tok.encode("hello", false, &out);
+    const hello_id = tok.lookup("hello").?;
+    try std.testing.expect(n >= 1);
+    try std.testing.expectEqual(hello_id, out[n - 1]);
+}
+
+test "Tokenizer.encode: bytes with no merge rule stay as individual byte tokens" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tok = try testTokenizer(arena.allocator());
+
+    var out: [16]u32 = undefined;
+    // 'x','y','z' each resolve individually via the byte-level vocab
+    // (id = byte + 3); no merge rule exists for "xy"/"yz" here, so they
+    // stay separate. Non-empty text always gets a leading dummy-prefix
+    // space token first (SentencePiece convention), so 4 total.
+    const n = tok.encode("xyz", false, &out);
+    try std.testing.expectEqual(@as(usize, 4), n);
+    const space_id = tok.lookup(" ").?;
+    try std.testing.expectEqual(space_id, out[0]);
+    try std.testing.expectEqual(@as(u32, 'x') + 3, out[1]);
+    try std.testing.expectEqual(@as(u32, 'y') + 3, out[2]);
+    try std.testing.expectEqual(@as(u32, 'z') + 3, out[3]);
+}
+
+test "Tokenizer.encode: bos plus dummy prefix plus merged word" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tok = try testTokenizer(arena.allocator());
+
+    var out: [16]u32 = undefined;
+    const n = tok.encode("hello", true, &out);
+    try std.testing.expectEqual(@as(u32, 1), out[0]); // BOS
+    const space_id = tok.lookup(" ").?;
+    try std.testing.expectEqual(space_id, out[1]); // dummy prefix
+    const hello_id = tok.lookup("hello").?;
+    try std.testing.expectEqual(hello_id, out[n - 1]);
+}
+
+test "Tokenizer.encode: output buffer truncation doesn't overflow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tok = try testTokenizer(arena.allocator());
+
+    var out: [2]u32 = undefined;
+    const n = tok.encode("hello world this is long", true, &out);
+    try std.testing.expect(n <= 2);
+}
 
 // ── W8A8 Weights and Forward ─────────────────────────────────────
 
@@ -1110,23 +1329,36 @@ pub fn generate(
     rng: *std.Random,
     writer: anytype,
 ) !void {
-    _ = prompt; // TODO: encode prompt to tokens
+    // Encode the prompt with a leading BOS so the model always starts
+    // from a consistent state regardless of prompt content.
+    var prompt_tokens: [4096]u32 = undefined;
+    const num_prompt_tokens: u32 = @intCast(tokenizer_inst.encode(prompt, true, &prompt_tokens));
 
-    // Start with BOS token (1)
-    var token: u32 = 1;
+    var token: u32 = prompt_tokens[0];
     var pos: u32 = 0;
 
     while (pos < max_tokens and pos < model.config.seq_len) {
         forward(model.config, &model.weights, state, token, pos);
 
-        // Sample next token
-        token = sample(state.logits, temperature, rng);
-
-        // Decode and print
-        const piece = tokenizer_inst.decode(token);
-        try writer.writeAll(piece);
+        var next: u32 = undefined;
+        if (pos + 1 < num_prompt_tokens) {
+            // Still priming on known prompt tokens: teacher-force the
+            // next input instead of sampling, so the KV cache absorbs
+            // the whole prompt before generation starts.
+            next = prompt_tokens[pos + 1];
+        } else {
+            next = sample(state.logits, temperature, rng);
+        }
 
         pos += 1;
+        token = next;
+
+        // Only print tokens generated after the prompt -- don't echo
+        // the prompt itself back to the caller.
+        if (pos >= num_prompt_tokens) {
+            const piece = tokenizer_inst.decode(token);
+            try writer.writeAll(piece);
+        }
     }
 }
 
