@@ -1,35 +1,50 @@
 const std = @import("std");
 
+fn module(
+    b: *std.Build,
+    path: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path(path),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // ── Static library (C ABI) ───────────────────────────────────
-    const lib = b.addStaticLibrary(.{
-        .name = "znap",
+    const znap_mod = b.addModule("znap", .{
         .root_source_file = b.path("src/znap.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    // ── Static library (C ABI) ───────────────────────────────────
+    const lib = b.addLibrary(.{
+        .name = "znap",
+        .root_module = znap_mod,
+        .linkage = .static,
+    });
     b.installArtifact(lib);
 
     // ── Shared library ───────────────────────────────────────────
-    const shared = b.addSharedLibrary(.{
+    const shared = b.addLibrary(.{
         .name = "znap",
-        .root_source_file = b.path("src/znap.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = module(b, "src/znap.zig", target, optimize),
+        .linkage = .dynamic,
     });
     b.installArtifact(shared);
 
     // ── Benchmark runner ─────────────────────────────────────────
     const bench_exe = b.addExecutable(.{
         .name = "znap-bench",
-        .root_source_file = b.path("benchmarks/bench.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "benchmarks/bench.zig", target, .ReleaseFast),
     });
-    bench_exe.root_module.addImport("znap", lib.root_module);
+    bench_exe.root_module.addImport("znap", znap_mod);
     b.installArtifact(bench_exe);
 
     const run_bench = b.addRunArtifact(bench_exe);
@@ -38,11 +53,9 @@ pub fn build(b: *std.Build) void {
 
     const audit_exe = b.addExecutable(.{
         .name = "znap-audit",
-        .root_source_file = b.path("benchmarks/audit.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "benchmarks/audit.zig", target, .ReleaseFast),
     });
-    audit_exe.root_module.addImport("znap", lib.root_module);
+    audit_exe.root_module.addImport("znap", znap_mod);
     b.installArtifact(audit_exe);
 
     const run_audit = b.addRunArtifact(audit_exe);
@@ -51,11 +64,9 @@ pub fn build(b: *std.Build) void {
 
     const scaling_exe = b.addExecutable(.{
         .name = "znap-scaling",
-        .root_source_file = b.path("benchmarks/scaling.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "benchmarks/scaling.zig", target, .ReleaseFast),
     });
-    scaling_exe.root_module.addImport("znap", lib.root_module);
+    scaling_exe.root_module.addImport("znap", znap_mod);
     b.installArtifact(scaling_exe);
 
     const run_scaling = b.addRunArtifact(scaling_exe);
@@ -64,11 +75,9 @@ pub fn build(b: *std.Build) void {
 
     const crossover_exe = b.addExecutable(.{
         .name = "znap-dqn-crossover",
-        .root_source_file = b.path("benchmarks/dqn_crossover.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "benchmarks/dqn_crossover.zig", target, .ReleaseFast),
     });
-    crossover_exe.root_module.addImport("znap", lib.root_module);
+    crossover_exe.root_module.addImport("znap", znap_mod);
     b.installArtifact(crossover_exe);
 
     const run_crossover = b.addRunArtifact(crossover_exe);
@@ -77,11 +86,9 @@ pub fn build(b: *std.Build) void {
 
     const qat_exe = b.addExecutable(.{
         .name = "znap-qat",
-        .root_source_file = b.path("benchmarks/qat.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "benchmarks/qat.zig", target, .ReleaseFast),
     });
-    qat_exe.root_module.addImport("znap", lib.root_module);
+    qat_exe.root_module.addImport("znap", znap_mod);
     b.installArtifact(qat_exe);
 
     const run_qat = b.addRunArtifact(qat_exe);
@@ -90,11 +97,9 @@ pub fn build(b: *std.Build) void {
 
     const proof_exe = b.addExecutable(.{
         .name = "znap-formal",
-        .root_source_file = b.path("benchmarks/formal_proof.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "benchmarks/formal_proof.zig", target, .ReleaseFast),
     });
-    proof_exe.root_module.addImport("znap", lib.root_module);
+    proof_exe.root_module.addImport("znap", znap_mod);
     b.installArtifact(proof_exe);
 
     const run_proof = b.addRunArtifact(proof_exe);
@@ -103,11 +108,9 @@ pub fn build(b: *std.Build) void {
 
     const margin_exe = b.addExecutable(.{
         .name = "znap-margin",
-        .root_source_file = b.path("benchmarks/margin_training.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "benchmarks/margin_training.zig", target, .ReleaseFast),
     });
-    margin_exe.root_module.addImport("znap", lib.root_module);
+    margin_exe.root_module.addImport("znap", znap_mod);
     b.installArtifact(margin_exe);
 
     const run_margin = b.addRunArtifact(margin_exe);
@@ -116,11 +119,9 @@ pub fn build(b: *std.Build) void {
 
     const deep_exe = b.addExecutable(.{
         .name = "znap-deep-scaling",
-        .root_source_file = b.path("benchmarks/deep_scaling.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "benchmarks/deep_scaling.zig", target, .ReleaseFast),
     });
-    deep_exe.root_module.addImport("znap", lib.root_module);
+    deep_exe.root_module.addImport("znap", znap_mod);
     b.installArtifact(deep_exe);
 
     const run_deep = b.addRunArtifact(deep_exe);
@@ -130,11 +131,9 @@ pub fn build(b: *std.Build) void {
     // ── Examples ─────────────────────────────────────────────────
     const rl_example = b.addExecutable(.{
         .name = "rl-agent",
-        .root_source_file = b.path("examples/rl_agent.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "examples/rl_agent.zig", target, .ReleaseFast),
     });
-    rl_example.root_module.addImport("znap", lib.root_module);
+    rl_example.root_module.addImport("znap", znap_mod);
     b.installArtifact(rl_example);
 
     const run_example = b.addRunArtifact(rl_example);
@@ -143,11 +142,9 @@ pub fn build(b: *std.Build) void {
 
     const train_example = b.addExecutable(.{
         .name = "train-and-generate",
-        .root_source_file = b.path("examples/train_and_generate.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "examples/train_and_generate.zig", target, .ReleaseFast),
     });
-    train_example.root_module.addImport("znap", lib.root_module);
+    train_example.root_module.addImport("znap", znap_mod);
     b.installArtifact(train_example);
 
     const run_train = b.addRunArtifact(train_example);
@@ -156,11 +153,9 @@ pub fn build(b: *std.Build) void {
 
     const gen_example = b.addExecutable(.{
         .name = "generate",
-        .root_source_file = b.path("examples/generate.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
+        .root_module = module(b, "examples/generate.zig", target, .ReleaseFast),
     });
-    gen_example.root_module.addImport("znap", lib.root_module);
+    gen_example.root_module.addImport("znap", znap_mod);
     b.installArtifact(gen_example);
 
     const run_gen = b.addRunArtifact(gen_example);
@@ -194,7 +189,8 @@ pub fn build(b: *std.Build) void {
         "src/quant_matmul.zig",
         "src/int8_matmul.zig",
         "src/w8a8.zig",
-        "src/sdot_matmul.zig",        "src/neon.zig",
+        "src/sdot_matmul.zig",
+        "src/neon.zig",
         "src/znap.zig",
     };
 
@@ -202,9 +198,7 @@ pub fn build(b: *std.Build) void {
 
     for (test_files) |file| {
         const t = b.addTest(.{
-            .root_source_file = b.path(file),
-            .target = target,
-            .optimize = optimize,
+            .root_module = module(b, file, target, optimize),
         });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
