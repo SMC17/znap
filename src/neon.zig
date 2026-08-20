@@ -48,7 +48,7 @@ pub fn dotI8Neon(w: [*]const i8, a: [*]const i8, n: usize) i32 {
             : [out] "={w0}" (partial),
             : [wp] "{x0}" (w_ptr),
               [ap] "{x1}" (a_ptr),
-            : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v16"
+            : .{ .v0 = true, .v1 = true, .v2 = true, .v3 = true, .v4 = true, .v5 = true, .v6 = true, .v7 = true, .v16 = true }
         );
 
         total += partial;
@@ -70,7 +70,7 @@ pub fn dotI8Neon(w: [*]const i8, a: [*]const i8, n: usize) i32 {
             : [out] "={w0}" (partial),
             : [wp] "{x0}" (w_ptr),
               [ap] "{x1}" (a_ptr),
-            : "v0", "v1", "v2"
+            : .{ .v0 = true, .v1 = true, .v2 = true }
         );
 
         total += partial;
@@ -318,7 +318,7 @@ fn dotQ5_0BlockAsm(block_ptr: [*]const u8, x_ptr: [*]const f32, masks_ptr: [*]co
         : [block] "{x0}" (block_ptr),
           [x] "{x1}" (x_ptr),
           [masks] "{x2}" (masks_ptr),
-        : "v0","v1","v2","v3","v4","v6","v7","v8","v9","v10","v11","v12","v13","v14","v15","v16","v17","v18","v19","v20","v21","v22","v23","v24","v25","v26","v27","w3","w4","memory"
+        : .{ .v0 = true, .v1 = true, .v2 = true, .v3 = true, .v4 = true, .v6 = true, .v7 = true, .v8 = true, .v9 = true, .v10 = true, .v11 = true, .v12 = true, .v13 = true, .v14 = true, .v15 = true, .v16 = true, .v17 = true, .v18 = true, .v19 = true, .v20 = true, .v21 = true, .v22 = true, .v23 = true, .v24 = true, .v25 = true, .v26 = true, .v27 = true, .w3 = true, .w4 = true, .memory = true }
     );
     return result;
 }
@@ -433,7 +433,7 @@ pub fn dotQ5_0Neon(raw_row: []const u8, x: []const f32, n: usize) f32 {
           [x] "{x1}" (x.ptr),
           [nb] "{x2}" (n_blocks),
           [masks] "{x3}" (&qh_masks),
-        : "v0","v1","v2","v3","v4","v5","v6","v7","v8","v9","v10","v11","v12","v13","v14","v15","v16","v17","v18","v19","v20","v21","v22","v23","v24","v25","v26","v27","v30","w6","w7","memory"
+        : .{ .v0 = true, .v1 = true, .v2 = true, .v3 = true, .v4 = true, .v5 = true, .v6 = true, .v7 = true, .v8 = true, .v9 = true, .v10 = true, .v11 = true, .v12 = true, .v13 = true, .v14 = true, .v15 = true, .v16 = true, .v17 = true, .v18 = true, .v19 = true, .v20 = true, .v21 = true, .v22 = true, .v23 = true, .v24 = true, .v25 = true, .v26 = true, .v27 = true, .v30 = true, .w6 = true, .w7 = true, .memory = true }
     );
 
     return result;
@@ -517,7 +517,7 @@ pub fn dotQ8_0Neon(raw_row: []const u8, x: []const f32, n: usize) f32 {
         : [raw] "{x0}" (raw_row.ptr),
           [x] "{x1}" (x.ptr),
           [nb] "{x2}" (n_blocks),
-        : "v0","v1","v2","v6","v7","v10","v11","v12","v13","v14","v15","v16","v17","v20","v21","v22","v23","v24","v25","v26","v27","v30","w6","w7","memory"
+        : .{ .v0 = true, .v1 = true, .v2 = true, .v6 = true, .v7 = true, .v10 = true, .v11 = true, .v12 = true, .v13 = true, .v14 = true, .v15 = true, .v16 = true, .v17 = true, .v20 = true, .v21 = true, .v22 = true, .v23 = true, .v24 = true, .v25 = true, .v26 = true, .v27 = true, .v30 = true, .w6 = true, .w7 = true, .memory = true }
     );
 
     return result;
@@ -601,7 +601,7 @@ pub fn dotQ4_0Neon(raw_row: []const u8, x: []const f32, n: usize) f32 {
         : [raw] "{x0}" (raw_row.ptr),
           [x] "{x1}" (x.ptr),
           [nb] "{x2}" (n_blocks),
-        : "v0","v1","v2","v3","v5","v6","v7","v10","v11","v12","v13","v14","v15","v16","v17","v18","v20","v21","v22","v23","v24","v25","v26","v27","v30","w6","w7","memory"
+        : .{ .v0 = true, .v1 = true, .v2 = true, .v3 = true, .v5 = true, .v6 = true, .v7 = true, .v10 = true, .v11 = true, .v12 = true, .v13 = true, .v14 = true, .v15 = true, .v16 = true, .v17 = true, .v18 = true, .v20 = true, .v21 = true, .v22 = true, .v23 = true, .v24 = true, .v25 = true, .v26 = true, .v27 = true, .v30 = true, .w6 = true, .w7 = true, .memory = true }
     );
 
     return result;
