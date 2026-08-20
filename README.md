@@ -1,15 +1,15 @@
 # znap
 
-**Status 2026-08-20 (Zig 0.16.0):** the package is **not compiled** on this
-toolchain. `build.zig` uses `addLibrary` / `root_module`. `zig build test`
-still fails on language/stdlib (asm clobbers, `std.fs.cwd`, `ArrayList.init`,
-`std.io.fixedBufferStream`, `std.process.getEnvVarOwned`). Historical
-nanosecond / tok/s figures below were **not** re-measured this pass. Do not
-treat them as a current gate. Repository stays private.
+**Status 2026-08-20 (Zig 0.16.0):** the package **compiles** and
+`zig build test --summary all` reports **617/617 tests passed** (experiment
+`exp-1787257292-956995154`). Nanosecond / tok/s figures below are
+**historical / unverified** on this host and toolchain. They are not a
+current measurement and are not a gate. Repository stays private.
 
 **Zero-allocation Neural Acceleration Primitives**
 
-**Zig for Serious Micro-Prediction — 31 ns Ternary Edge Inference Under Quantitative Mercantilism.**
+**Zig for Serious Micro-Prediction.** Historical Apple M1 31 ns linear-policy
+numbers in this file are unverified on Zig 0.16.
 
 A neural inference engine written in Zig. Loads pretrained models. Generates text. No Python. No PyTorch. No dependencies.
 
@@ -19,7 +19,9 @@ znap is a sovereign appliance-layer primitive for real-time micro-prediction and
 
 Policy execution at the edge (trading signals, venue operations, robotics control loops, sensor-to-action) is one such tollbooth. Sub-microsecond, deterministic, zero-dependency inference on commodity hardware is the infrastructure that lets a sovereign operator own the decision layer instead of renting it from Python/PyTorch/NumPy stacks.
 
-**The 31 ns result (Apple M1, NEON SDOT asm, Zig ReleaseFast) is not a curiosity.** It is evidence that the Zig substrate, with comptime specialization and explicit SIMD, can deliver 30–140× speedups on the exact class of micro-prediction workloads that dominate high-frequency decision systems — while using 8–14× less memory via lossless ternary compression for linear policies. This is the material basis for the "graveyard for non-Zig tooling" thesis at the appliance layer: superior, auditable, zero-rent performance that first-principles engineers can embed directly.
+**The 31 ns Apple M1 figure is historical / unverified on this tree.** It was
+not re-measured on Zig 0.16. Treat it as an old M1 + Zig ~0.14 report, not a
+current proof.
 
 See the inverse scaling paper (paper/inverse_scaling.md) for the full lossless ternary result and deployment recipe. See AUDIT_NOTES/ for full Type I/II disclosures on hardware, Zig version, and build system.
 
@@ -27,7 +29,7 @@ This package is positioned as an embeddable primitive (MIT license — intention
 
 ---
 
-**Performance (Apple M1 reference measurements — see AUDIT_NOTES/ARCH_HARDWARE_DISCLOSURE.md for x86_64 Linux scalar fallback reality)**
+**Performance (historical Apple M1 reports — unverified on Zig 0.16; see AUDIT_NOTES/ARCH_HARDWARE_DISCLOSURE.md for x86_64 Linux scalar fallback)**
 
 Small-model inference, benchmarked on Apple M1:
 
@@ -47,15 +49,15 @@ Compared to equivalent operations in Python:
 | 7-agent ensemble | 29.5 μs | 21.3 μs | **0.222 μs** | 96× |
 
 **Critical disclosures (Type I discipline):**
-- All nanosecond numbers above are Apple M1 (aarch64) + NEON SDOT inline asm + Zig ~0.14 ReleaseFast. On x86_64 Linux (this development host) the same kernels take the explicit scalar fallback path in src/neon.zig and src/sdot_matmul.zig and are materially slower. Reproduce the 31 ns bar only on equivalent Apple Silicon class hardware.
-- Build system in this tree uses 0.14-era Zig std.Build API and does not compile out-of-the-box on Zig 0.16+. See AUDIT_NOTES/QUARANTINE_ZIG_016_BUILD.md. The core micro-prediction logic (policy + quantized + sdot) is portable; only orchestration is dated.
-- Zero-allocation and speedup claims are grounded in the original mac-mining runs. Independent verification on the reference hardware class is required (see the benchmark challenge artifact).
+- All nanosecond numbers above are historical Apple M1 (aarch64) + NEON SDOT inline asm + Zig ~0.14 ReleaseFast reports. They were **not** re-measured on Zig 0.16. On x86_64 Linux the same kernels take the scalar fallback path in src/neon.zig and src/sdot_matmul.zig.
+- This tree's `build.zig` and remaining stdlib/asm call sites were ported so `zig build test` compiles on Zig 0.16.0.
+- Zero-allocation and speedup claims from older M1 runs still require independent re-measurement.
 
 **License note (per 2026-05-12 PRE_LAUNCH_CHECKLIST audit):** MIT. znap is intentionally positioned as an embeddable primitive; the sovereign-stack AGPL default is acknowledged as the canon for most public OSS but is documented here as the exception for libraries that downstream projects must link. See LICENSE and AUDIT_NOTES/.
 
-**Evidence pointers:** All original 31 ns / 33 M evals/s numbers trace to the NEON SDOT kernels in src/sdot_matmul.zig + src/neon.zig (aarch64 asm path) and the comptime LinearPolicy/TernaryPolicy evaluate paths in src/policy.zig + src/quantized.zig. Full audit trail in the mac-mining reconnaissance clone (git SHA 9101e45) and AUDIT_NOTES/.
+**Evidence pointers:** Historical 31 ns / 33 M evals/s numbers (unverified here) were attributed to NEON SDOT kernels in src/sdot_matmul.zig + src/neon.zig and LinearPolicy/TernaryPolicy in src/policy.zig + src/quantized.zig.
 
-**Benchmark challenge:** Run the standalone challenge in benchmarks/ (or the extracted micro-challenge) to time the 30×6 ternary policy path on your hardware. Target: match or beat the 31 ns reference on M1-class aarch64 + Zig 0.14 ReleaseFast. Full falsifier included.
+**Benchmark challenge:** Time the 30×6 ternary policy path on your hardware. Do not treat the old 31 ns M1 number as a current bar.
 
 ---
 
@@ -89,15 +91,15 @@ zig build run -- models/stories15M.bin
 # Run benchmarks
 zig build bench
 
-# Run all 395 tests
+# Run unit tests
 zig build test
 ```
 
-Requires Zig 0.14+. No other dependencies.
+Requires Zig 0.16. No other dependencies.
 
 ## Performance
 
-Small-model inference, benchmarked on Apple M1:
+Historical Apple M1 reports (unverified on Zig 0.16):
 
 ```
 SIMD dot product (30-dim):       < 1 ns      3.2 billion ops/s
@@ -163,7 +165,7 @@ znap exploits three properties unique to Zig:
 const znap = @import("znap");
 const Policy = znap.LinearPolicy(30, 6);  // specialized at compile time
 var policy = Policy.init();
-const result = policy.evaluate(&features); // 31 nanoseconds
+const result = policy.evaluate(&features);
 ```
 
 **Zero Allocation.** The entire inference hot path runs on the stack. No allocator, no GC, no `malloc` in the inner loop.

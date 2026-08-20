@@ -16,6 +16,25 @@ const w8a8 = @import("w8a8.zig");
 const neon = @import("neon.zig");
 const sdot_mm = @import("sdot_matmul.zig");
 
+fn readCwdFileAligned(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    comptime align_n: usize,
+) ![]align(align_n) u8 {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const st = try file.stat(io);
+    const file_size: usize = std.math.cast(usize, st.size) orelse return error.FileTooBig;
+    const data = try allocator.alignedAlloc(u8, .fromByteUnits(align_n), file_size);
+    errdefer allocator.free(data);
+    const n = try file.readPositionalAll(io, data, 0);
+    if (n != file_size) return error.IncompleteRead;
+    return data;
+}
+
 pub const Config = struct {
     dim: u32,
     hidden_dim: u32,
@@ -767,13 +786,8 @@ pub const Model = struct {
     data: []align(4) const u8, // mmap'd or loaded file data
 
     pub fn load(path: []const u8, allocator: std.mem.Allocator) !Model {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-
-        const file_size = try file.getEndPos();
-        const data = try allocator.alignedAlloc(u8, 4, file_size);
-        const bytes_read = try file.readAll(data);
-        if (bytes_read != file_size) return error.IncompleteRead;
+        const data = try readCwdFileAligned(allocator, path, 4);
+        errdefer allocator.free(data);
 
         // Parse config (7 × i32 at start of file)
         const config_ints: *const [7]i32 = @ptrCast(@alignCast(data.ptr));
@@ -871,12 +885,8 @@ pub const Tokenizer = struct {
     data: []const u8,
 
     pub fn load(path: []const u8, vocab_size: u32, allocator: std.mem.Allocator) !Tokenizer {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-
-        const file_size = try file.getEndPos();
-        const data = try allocator.alloc(u8, file_size);
-        _ = try file.readAll(data);
+        const data = try readCwdFileAligned(allocator, path, 1);
+        errdefer allocator.free(data);
 
         var vocab = try allocator.alloc([]const u8, vocab_size);
         var scores = try allocator.alloc(f32, vocab_size);
@@ -1443,15 +1453,13 @@ pub const GGUFModel = struct {
 
         const kv_dim = config.kvDim();
 
-        const stderr = std.io.getStdErr().writer();
-
         // Dequantize all weights from GGUF tensors
         // The GGUF tensor layout for llama is: blk.{layer}.{name}
         // Weight matrices in GGUF are [out_dim, in_dim] (row-major),
         // same as our matmul expects: w[i * n + j] for output i, input j.
 
         // Token embedding: [dim, vocab_size] -> we need [vocab_size * dim] flat, row per token
-        try stderr.print("  Loading token_embd.weight...\n", .{});
+        std.debug.print("  Loading token_embd.weight...\n", .{});
         const token_embedding_data = try gf.dequantizeTensor(
             gf.getTensorInfo("token_embd.weight") orelse return error.MissingTensor,
             allocator,
@@ -1459,7 +1467,7 @@ pub const GGUFModel = struct {
         errdefer allocator.free(token_embedding_data);
 
         // Per-layer weights: concatenate across layers
-        try stderr.print("  Loading {d} layers...\n", .{n_layers});
+        std.debug.print("  Loading {d} layers...\n", .{n_layers});
 
         var rms_att = try allocator.alloc(f32, n_layers * dim);
         errdefer allocator.free(rms_att);
@@ -1549,19 +1557,19 @@ pub const GGUFModel = struct {
         }
 
         // Final norm
-        try stderr.print("  Loading output_norm.weight...\n", .{});
+        std.debug.print("  Loading output_norm.weight...\n", .{});
         const rms_final = try gf.readTensorF32("output_norm.weight", allocator);
         errdefer allocator.free(rms_final);
 
         // Output projection (wcls) — may be tied with token embedding
         var wcls_data: ?[]f32 = null;
         if (gf.getTensorInfo("output.weight")) |_| {
-            try stderr.print("  Loading output.weight...\n", .{});
+            std.debug.print("  Loading output.weight...\n", .{});
             wcls_data = try gf.readTensorF32("output.weight", allocator);
         }
 
         // Load tokenizer from GGUF metadata
-        try stderr.print("  Loading tokenizer...\n", .{});
+        std.debug.print("  Loading tokenizer...\n", .{});
         var vocab_strings: ?[][]const u8 = null;
         vocab_strings = gf.readStringArray("tokenizer.ggml.tokens", allocator) catch null;
 

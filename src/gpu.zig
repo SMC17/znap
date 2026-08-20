@@ -23,6 +23,24 @@ const simd = @import("simd.zig");
 const tensor = @import("tensor.zig");
 const builtin = @import("builtin");
 
+fn cudaEnvSet() bool {
+    if (builtin.link_libc) return std.c.getenv("ZNAP_CUDA") != null;
+    if (comptime builtin.os.tag != .linux) return false;
+    const fd = std.posix.openat(std.posix.AT.FDCWD, "/proc/self/environ", .{ .ACCMODE = .RDONLY }, 0) catch return false;
+    defer std.Io.Threaded.closeFd(fd);
+    var buf: [8192]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return false;
+    var i: usize = 0;
+    while (i < n) {
+        const start = i;
+        while (i < n and buf[i] != 0) : (i += 1) {}
+        const entry = buf[start..i];
+        if (entry.len >= 10 and std.mem.startsWith(u8, entry, "ZNAP_CUDA=")) return true;
+        i += 1;
+    }
+    return false;
+}
+
 // ── Backend Detection ────────────────────────────────────────────
 
 pub const Backend = enum {
@@ -31,12 +49,7 @@ pub const Backend = enum {
     metal,
 
     pub fn detect() Backend {
-        // Check for CUDA at runtime via environment
-        if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZNAP_CUDA") catch null) |v| {
-            defer std.heap.page_allocator.free(v);
-            return .cuda;
-        }
-        // On macOS, default to Metal if available
+        if (cudaEnvSet()) return .cuda;
         if (builtin.os.tag == .macos) {
             return .metal; // Metal always available on macOS
         }
