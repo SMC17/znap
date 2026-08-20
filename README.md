@@ -1,5 +1,12 @@
 # znap
 
+**Status 2026-08-20 (Zig 0.16.0):** the package is **not compiled** on this
+toolchain. `build.zig` uses `addLibrary` / `root_module`. `zig build test`
+still fails on language/stdlib (asm clobbers, `std.fs.cwd`, `ArrayList.init`,
+`std.io.fixedBufferStream`, `std.process.getEnvVarOwned`). Historical
+nanosecond / tok/s figures below were **not** re-measured this pass. Do not
+treat them as a current gate. Repository stays private.
+
 **Zero-allocation Neural Acceleration Primitives**
 
 **Zig for Serious Micro-Prediction — 31 ns Ternary Edge Inference Under Quantitative Mercantilism.**
