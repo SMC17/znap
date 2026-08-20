@@ -48,6 +48,103 @@ pub const WeightError = error{
     TooManyDims,
 };
 
+const BufferReader = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    fn readAll(self: *BufferReader, dest: []u8) error{}!usize {
+        const n = @min(dest.len, self.data.len - self.pos);
+        @memcpy(dest[0..n], self.data[self.pos..][0..n]);
+        self.pos += n;
+        return n;
+    }
+
+    fn readInt(self: *BufferReader, comptime T: type, endian: std.builtin.Endian) error{EndOfStream}!T {
+        const n = @divExact(@bitSizeOf(T), 8);
+        if (self.pos + n > self.data.len) return error.EndOfStream;
+        const bytes = self.data[self.pos..][0..n];
+        self.pos += n;
+        return std.mem.readInt(T, bytes[0..n], endian);
+    }
+
+    fn readByte(self: *BufferReader) error{EndOfStream}!u8 {
+        if (self.pos >= self.data.len) return error.EndOfStream;
+        const b = self.data[self.pos];
+        self.pos += 1;
+        return b;
+    }
+
+    fn skipBytes(self: *BufferReader, n: u64, _: anytype) error{EndOfStream}!void {
+        const remaining = self.data.len - self.pos;
+        if (n > remaining) return error.EndOfStream;
+        self.pos += @intCast(n);
+    }
+};
+
+const ListWriter = struct {
+    list: *std.ArrayList(u8),
+    gpa: std.mem.Allocator,
+
+    fn writeAll(self: *ListWriter, bytes: []const u8) std.mem.Allocator.Error!void {
+        try self.list.appendSlice(self.gpa, bytes);
+    }
+
+    fn writeByte(self: *ListWriter, byte: u8) std.mem.Allocator.Error!void {
+        try self.list.append(self.gpa, byte);
+    }
+
+    fn writeInt(self: *ListWriter, comptime T: type, value: T, endian: std.builtin.Endian) std.mem.Allocator.Error!void {
+        var bytes: [@divExact(@bitSizeOf(T), 8)]u8 = undefined;
+        std.mem.writeInt(T, &bytes, value, endian);
+        try self.writeAll(&bytes);
+    }
+};
+
+const FixedWriter = struct {
+    buf: []u8,
+    pos: usize = 0,
+
+    fn writeAll(self: *FixedWriter, bytes: []const u8) error{NoSpaceLeft}!void {
+        if (self.pos + bytes.len > self.buf.len) return error.NoSpaceLeft;
+        @memcpy(self.buf[self.pos..][0..bytes.len], bytes);
+        self.pos += bytes.len;
+    }
+
+    fn writeByte(self: *FixedWriter, byte: u8) error{NoSpaceLeft}!void {
+        try self.writeAll(&.{byte});
+    }
+
+    fn writeInt(self: *FixedWriter, comptime T: type, value: T, endian: std.builtin.Endian) error{NoSpaceLeft}!void {
+        var bytes: [@divExact(@bitSizeOf(T), 8)]u8 = undefined;
+        std.mem.writeInt(T, &bytes, value, endian);
+        try self.writeAll(&bytes);
+    }
+};
+
+fn readCwdFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const st = try file.stat(io);
+    const file_size: usize = std.math.cast(usize, st.size) orelse return error.FileTooBig;
+    const buf = try allocator.alloc(u8, file_size);
+    errdefer allocator.free(buf);
+    const n = try file.readPositionalAll(io, buf, 0);
+    if (n != file_size) return error.UnexpectedEof;
+    return buf;
+}
+
+fn writeCwdFile(path: []const u8, bytes: []const u8) !void {
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    try file.writePositionalAll(io, bytes, 0);
+}
+
 // ── Header ───────────────────────────────────────────────────────
 
 pub const Header = struct {
@@ -112,7 +209,7 @@ pub fn readTensorMeta(reader: anytype, allocator: std.mem.Allocator) !TensorEntr
     }
 
     const dtype_byte = try reader.readByte();
-    const dtype: DType = std.meta.intToEnum(DType, dtype_byte) catch return WeightError.UnsupportedDtype;
+    const dtype: DType = std.enums.fromInt(DType, dtype_byte) orelse return WeightError.UnsupportedDtype;
 
     const elem_size: u64 = switch (dtype) {
         .f32 => 4,
@@ -280,9 +377,10 @@ pub fn loadLinearPolicy(
     comptime ActionDim: usize,
     path: []const u8,
 ) !policy.LinearPolicy(FeatureDim, ActionDim) {
-    var file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    return loadLinearPolicyFromReader(FeatureDim, ActionDim, file.reader());
+    const data = try readCwdFile(std.heap.page_allocator, path);
+    defer std.heap.page_allocator.free(data);
+    var reader: BufferReader = .{ .data = data };
+    return loadLinearPolicyFromReader(FeatureDim, ActionDim, &reader);
 }
 
 /// Load a LinearPolicy from any reader (file, buffer, etc).
@@ -307,9 +405,10 @@ pub fn loadDQNPolicy(
     comptime ActionDim: usize,
     path: []const u8,
 ) !policy.DQNPolicy(FeatureDim, HiddenDim, ActionDim) {
-    var file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    return loadDQNPolicyFromReader(FeatureDim, HiddenDim, ActionDim, file.reader());
+    const data = try readCwdFile(std.heap.page_allocator, path);
+    defer std.heap.page_allocator.free(data);
+    var reader: BufferReader = .{ .data = data };
+    return loadDQNPolicyFromReader(FeatureDim, HiddenDim, ActionDim, &reader);
 }
 
 /// Load a DQNPolicy from any reader.
@@ -352,9 +451,10 @@ pub fn loadTransformer(
     comptime MaxSeqLen: usize,
     path: []const u8,
 ) !transformer_mod.Transformer(ModelDim, NumHeads, NumLayers, VocabSize, MaxSeqLen) {
-    var file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    return loadTransformerFromReader(ModelDim, NumHeads, NumLayers, VocabSize, MaxSeqLen, file.reader());
+    const data = try readCwdFile(std.heap.page_allocator, path);
+    defer std.heap.page_allocator.free(data);
+    var reader: BufferReader = .{ .data = data };
+    return loadTransformerFromReader(ModelDim, NumHeads, NumLayers, VocabSize, MaxSeqLen, &reader);
 }
 
 /// Load a Transformer from any reader.
@@ -530,9 +630,11 @@ pub fn saveLinearPolicy(
     p: *const policy.LinearPolicy(FeatureDim, ActionDim),
     path: []const u8,
 ) !void {
-    var file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
-    try saveLinearPolicyToWriter(FeatureDim, ActionDim, p, file.writer());
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(std.heap.page_allocator);
+    var writer: ListWriter = .{ .list = &list, .gpa = std.heap.page_allocator };
+    try saveLinearPolicyToWriter(FeatureDim, ActionDim, p, &writer);
+    try writeCwdFile(path, list.items);
 }
 
 /// Save a LinearPolicy to any writer.
@@ -555,9 +657,11 @@ pub fn saveDQNPolicy(
     p: *const policy.DQNPolicy(FeatureDim, HiddenDim, ActionDim),
     path: []const u8,
 ) !void {
-    var file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
-    try saveDQNPolicyToWriter(FeatureDim, HiddenDim, ActionDim, p, file.writer());
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(std.heap.page_allocator);
+    var writer: ListWriter = .{ .list = &list, .gpa = std.heap.page_allocator };
+    try saveDQNPolicyToWriter(FeatureDim, HiddenDim, ActionDim, p, &writer);
+    try writeCwdFile(path, list.items);
 }
 
 /// Save a DQNPolicy to any writer.
@@ -581,22 +685,20 @@ pub fn saveDQNPolicyToWriter(
 
 /// Helper: write a .znap buffer in memory using an ArrayList.
 fn testWriteToBuffer(comptime writeFn: anytype, args: anytype) ![]u8 {
-    var list = std.ArrayList(u8).init(std.testing.allocator);
-    errdefer list.deinit();
-    const writer = list.writer();
-    try @call(.auto, writeFn, .{writer} ++ args);
-    return list.toOwnedSlice();
+    var list: std.ArrayList(u8) = .empty;
+    errdefer list.deinit(std.testing.allocator);
+    var writer: ListWriter = .{ .list = &list, .gpa = std.testing.allocator };
+    try @call(.auto, writeFn, .{&writer} ++ args);
+    return list.toOwnedSlice(std.testing.allocator);
 }
 
 test "header round-trip" {
-    // Write a header
     var buf: [16]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writeHeader(fbs.writer(), 3);
+    var writer: FixedWriter = .{ .buf = &buf };
+    try writeHeader(&writer, 3);
 
-    // Read it back
-    fbs.pos = 0;
-    const header = try readHeader(fbs.reader());
+    var reader: BufferReader = .{ .data = buf[0..writer.pos] };
+    const header = try readHeader(&reader);
     try std.testing.expectEqual(@as(u32, 1), header.version);
     try std.testing.expectEqual(@as(u32, 3), header.num_tensors);
     try std.testing.expectEqual(@as(u32, 0), header.metadata_len);
@@ -604,8 +706,8 @@ test "header round-trip" {
 
 test "invalid magic" {
     var buf = [_]u8{ 'B', 'A', 'D', '!', 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    var fbs = std.io.fixedBufferStream(&buf);
-    try std.testing.expectError(WeightError.InvalidMagic, readHeader(fbs.reader()));
+    var reader: BufferReader = .{ .data = &buf };
+    try std.testing.expectError(WeightError.InvalidMagic, readHeader(&reader));
 }
 
 test "loadTensorFromSlice" {
@@ -634,13 +736,14 @@ test "linear policy round-trip via buffer" {
     p.bias.data[0] = .{ 0.1, 0.2, 0.3 };
 
     // Write to buffer
-    var list = std.ArrayList(u8).init(std.testing.allocator);
-    defer list.deinit();
-    try saveLinearPolicyToWriter(F, A, &p, list.writer());
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(std.testing.allocator);
+    var writer: ListWriter = .{ .list = &list, .gpa = std.testing.allocator };
+    try saveLinearPolicyToWriter(F, A, &p, &writer);
 
     // Read back
-    var fbs = std.io.fixedBufferStream(list.items);
-    const loaded = try loadLinearPolicyFromReader(F, A, fbs.reader());
+    var reader: BufferReader = .{ .data = list.items };
+    const loaded = try loadLinearPolicyFromReader(F, A, &reader);
 
     // Verify weights match
     for (0..A) |r| {
@@ -663,13 +766,14 @@ test "DQN policy round-trip via buffer" {
     const d = D.initXavier(42);
 
     // Write to buffer
-    var list = std.ArrayList(u8).init(std.testing.allocator);
-    defer list.deinit();
-    try saveDQNPolicyToWriter(F, H, A, &d, list.writer());
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(std.testing.allocator);
+    var writer: ListWriter = .{ .list = &list, .gpa = std.testing.allocator };
+    try saveDQNPolicyToWriter(F, H, A, &d, &writer);
 
     // Read back
-    var fbs = std.io.fixedBufferStream(list.items);
-    const loaded = try loadDQNPolicyFromReader(F, H, A, fbs.reader());
+    var reader: BufferReader = .{ .data = list.items };
+    const loaded = try loadDQNPolicyFromReader(F, H, A, &reader);
 
     // Verify all weights match
     for (0..H) |r| {
@@ -701,13 +805,14 @@ test "loaded policy produces same inference" {
     for (0..50) |_| p.update(&features, 1, 1.0, 0.05);
 
     // Serialize
-    var list = std.ArrayList(u8).init(std.testing.allocator);
-    defer list.deinit();
-    try saveLinearPolicyToWriter(F, A, &p, list.writer());
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(std.testing.allocator);
+    var writer: ListWriter = .{ .list = &list, .gpa = std.testing.allocator };
+    try saveLinearPolicyToWriter(F, A, &p, &writer);
 
     // Deserialize
-    var fbs = std.io.fixedBufferStream(list.items);
-    const loaded = try loadLinearPolicyFromReader(F, A, fbs.reader());
+    var reader: BufferReader = .{ .data = list.items };
+    const loaded = try loadLinearPolicyFromReader(F, A, &reader);
 
     // Both should produce identical results
     const r1 = p.evaluate(&features);
@@ -720,24 +825,21 @@ test "loaded policy produces same inference" {
 }
 
 test "write and read single tensor entry" {
-    // Write a 2x3 tensor
-    var list = std.ArrayList(u8).init(std.testing.allocator);
-    defer list.deinit();
-    const writer = list.writer();
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(std.testing.allocator);
+    var writer: ListWriter = .{ .list = &list, .gpa = std.testing.allocator };
 
-    try writeHeader(writer, 1);
+    try writeHeader(&writer, 1);
     const data = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
     const shape = [_]u32{ 2, 3 };
-    try writeTensor(writer, "test_tensor", &shape, &data);
+    try writeTensor(&writer, "test_tensor", &shape, &data);
 
-    // Read back
-    var fbs = std.io.fixedBufferStream(list.items);
-    const reader = fbs.reader();
+    var reader: BufferReader = .{ .data = list.items };
 
-    const header = try readHeader(reader);
+    const header = try readHeader(&reader);
     try std.testing.expectEqual(@as(u32, 1), header.num_tensors);
 
-    const entry = try readTensorMeta(reader, std.testing.allocator);
+    const entry = try readTensorMeta(&reader, std.testing.allocator);
     defer std.testing.allocator.free(entry.name);
 
     try std.testing.expectEqualStrings("test_tensor", entry.name);
@@ -747,33 +849,32 @@ test "write and read single tensor entry" {
     try std.testing.expectEqual(DType.f32, entry.dtype);
 
     var read_data: [6]f32 = undefined;
-    try readF32Data(reader, &read_data);
+    try readF32Data(&reader, &read_data);
     for (0..6) |i| {
         try std.testing.expectEqual(data[i], read_data[i]);
     }
 }
 
 test "multiple tensors sequential read" {
-    var list = std.ArrayList(u8).init(std.testing.allocator);
-    defer list.deinit();
-    const writer = list.writer();
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(std.testing.allocator);
+    var writer: ListWriter = .{ .list = &list, .gpa = std.testing.allocator };
 
-    try writeHeader(writer, 2);
-    try writeTensor(writer, "first", &.{ 1, 2 }, &.{ 10.0, 20.0 });
-    try writeTensor(writer, "second", &.{ 1, 3 }, &.{ 30.0, 40.0, 50.0 });
+    try writeHeader(&writer, 2);
+    try writeTensor(&writer, "first", &.{ 1, 2 }, &.{ 10.0, 20.0 });
+    try writeTensor(&writer, "second", &.{ 1, 3 }, &.{ 30.0, 40.0, 50.0 });
 
-    var fbs = std.io.fixedBufferStream(list.items);
-    const reader = fbs.reader();
+    var reader: BufferReader = .{ .data = list.items };
     var remaining: u32 = undefined;
 
-    const header = try readHeader(reader);
+    const header = try readHeader(&reader);
     remaining = header.num_tensors;
 
-    const t1 = try readNamedTensor(1, 2, reader, std.testing.allocator, "first", &remaining);
+    const t1 = try readNamedTensor(1, 2, &reader, std.testing.allocator, "first", &remaining);
     try std.testing.expectEqual(@as(f32, 10.0), t1.data[0][0]);
     try std.testing.expectEqual(@as(f32, 20.0), t1.data[0][1]);
 
-    const t2 = try readNamedTensor(1, 3, reader, std.testing.allocator, "second", &remaining);
+    const t2 = try readNamedTensor(1, 3, &reader, std.testing.allocator, "second", &remaining);
     try std.testing.expectEqual(@as(f32, 30.0), t2.data[0][0]);
     try std.testing.expectEqual(@as(f32, 50.0), t2.data[0][2]);
 }

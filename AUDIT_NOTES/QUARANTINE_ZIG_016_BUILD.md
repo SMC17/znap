@@ -17,3 +17,9 @@ Disposition for clean OSS package:
 Evidence: Direct `zig build` failure log captured in session (addStaticLibrary error + reference trace to std/Build.zig).
 Preserved: Original clone + prebuilt test_* NEON binaries remain authoritative for the M1 numbers.
 This note is part of the sovereign audit trail for the znap OSS launch.
+
+## Update 2026-08-20
+
+`build.zig` plus remaining language/stdlib call sites were ported. On Zig
+0.16.0, `zig build test --summary all` is 51/51 steps, 617/617 tests.
+Historical 31 ns figures were not re-measured. See STATUS.md.

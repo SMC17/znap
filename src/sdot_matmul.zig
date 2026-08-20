@@ -70,7 +70,7 @@ fn sdotBlock(w: [*]const i8, x: [*]const i8) i32 {
         : [out] "={w2}" (result),
         : [w] "{x0}" (w),
           [x] "{x1}" (x),
-        : "v0", "v1", "v2", "v3", "v4"
+        : .{ .v0 = true, .v1 = true, .v2 = true, .v3 = true, .v4 = true }
     );
     return result;
 }
@@ -149,7 +149,7 @@ fn sdotRowQ5(
           [q8] "{x2}" (q8_blocks),
           [nb] "{x3}" (n_blocks),
           [bb] "{x4}" (w_block_bytes),
-        : "v0","v1","v2","v3","v4","v5","v6","v30","x11","x12","x13","x14","x15","memory"
+        : .{ .v0 = true, .v1 = true, .v2 = true, .v3 = true, .v4 = true, .v5 = true, .v6 = true, .v30 = true, .x11 = true, .x12 = true, .x13 = true, .x14 = true, .x15 = true, .memory = true }
     );
     return result;
 }

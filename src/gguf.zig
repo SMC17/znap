@@ -190,13 +190,17 @@ pub const GGUFFile = struct {
     allocator: std.mem.Allocator,
 
     pub fn open(path: []const u8, allocator: std.mem.Allocator) !GGUFFile {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
+        var threaded = std.Io.Threaded.init(allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
 
-        const file_size = try file.getEndPos();
-        const data = try allocator.alignedAlloc(u8, 4, file_size);
+        const st = try file.stat(io);
+        const file_size: usize = std.math.cast(usize, st.size) orelse return error.FileTooBig;
+        const data = try allocator.alignedAlloc(u8, .fromByteUnits(4), file_size);
         errdefer allocator.free(data);
-        const bytes_read = try file.readAll(data);
+        const bytes_read = try file.readPositionalAll(io, data, 0);
         if (bytes_read != file_size) return error.IncompleteRead;
 
         return parseFromData(data, allocator);
