@@ -1380,7 +1380,7 @@ pub const GGUFTokenizer = struct {
 
     pub fn decode(self: *const GGUFTokenizer, token: u32) []const u8 {
         if (token >= self.vocab_size) return "<unk>";
-        return self.vocab[token];
+        return rawByte(self.vocab[token]);
     }
 };
 
