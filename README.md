@@ -1,78 +1,25 @@
 # znap
 
-**Status 2026-08-20 (Zig 0.16.0):** the package **compiles** and
-`zig build test --summary all` reports **617/617 tests passed** (experiment
-`exp-1787257292-956995154`). Nanosecond / tok/s figures below are
-**historical / unverified** on this host and toolchain. They are not a
-current measurement and are not a gate. Repository stays private.
-
-**Zero-allocation Neural Acceleration Primitives**
-
-**Zig for Serious Micro-Prediction.** Historical Apple M1 31 ns linear-policy
-numbers in this file are unverified on Zig 0.16.
-
-A neural inference engine written in Zig. Loads pretrained models. Generates text. No Python. No PyTorch. No dependencies.
-
-## Quantitative Mercantilism Positioning (Sovereign Stack Context)
-
-znap is a sovereign appliance-layer primitive for real-time micro-prediction and decision policies. In the framework of Quantitative Mercantilism, markets and physical systems are graphs of flows; durable advantage accrues to those who control the tollbooths through which disproportionate flow must pass.
-
-Policy execution at the edge (trading signals, venue operations, robotics control loops, sensor-to-action) is one such tollbooth. Sub-microsecond, deterministic, zero-dependency inference on commodity hardware is the infrastructure that lets a sovereign operator own the decision layer instead of renting it from Python/PyTorch/NumPy stacks.
-
-**The 31 ns Apple M1 figure is historical / unverified on this tree.** It was
-not re-measured on Zig 0.16. Treat it as an old M1 + Zig ~0.14 report, not a
-current proof.
-
-See the inverse scaling paper (paper/inverse_scaling.md) for the full lossless ternary result and deployment recipe. See AUDIT_NOTES/ for full Type I/II disclosures on hardware, Zig version, and build system.
-
-This package is positioned as an embeddable primitive (MIT license — intentional documented exception to the sovereign-stack AGPL default for libraries that downstream projects must link against).
-
----
-
-**Performance (historical Apple M1 reports — unverified on Zig 0.16; see AUDIT_NOTES/ARCH_HARDWARE_DISCLOSURE.md for x86_64 Linux scalar fallback)**
-
-Small-model inference, benchmarked on Apple M1:
+Zero-allocation neural inference in Zig 0.16: small RL policies in tens of
+nanoseconds, and llama2.c-format text generation. No Python, no PyTorch, no
+dependencies. MIT.
 
 ```
-SIMD dot product (30-dim):       < 1 ns      3.2 billion ops/s
-Linear policy (30→6):             31 ns       33 million evals/s
-DQN 2-layer (30→64→6):          194 ns        5.2 million evals/s
-7-agent ensemble:                222 ns        4.6 million evals/s
+$ zig build run -Doptimize=ReleaseFast -- models/stories15M.bin
+
+ Lily was miserable. She did not want to play with her toys or read her
+ books. She only wanted to go to the store with her mom...
+
+  256 tokens in 364ms (703.6 tok/s)
 ```
 
-Compared to equivalent operations in Python:
+## Status
 
-| Operation | NumPy | PyTorch | znap | Speedup |
-|-----------|-------|---------|------|---------|
-| Linear 30→6 | 4.28 μs | 3.32 μs | **0.031 μs** | 138× |
-| DQN 30×64→6 | 6.38 μs | 6.69 μs | **0.194 μs** | 34× |
-| 7-agent ensemble | 29.5 μs | 21.3 μs | **0.222 μs** | 96× |
+**Unit-tested, benchmarked on one machine.** `zig build test --summary all`:
+625/625 on Zig 0.16.0. Numbers below were measured on 2026-11-12, Apple M2 Max,
+macOS, Zig 0.16.0, ReleaseFast, with the commands shown. They are one machine,
+not a general claim; run them on yours.
 
-**Critical disclosures (Type I discipline):**
-- All nanosecond numbers above are historical Apple M1 (aarch64) + NEON SDOT inline asm + Zig ~0.14 ReleaseFast reports. They were **not** re-measured on Zig 0.16. On x86_64 Linux the same kernels take the scalar fallback path in src/neon.zig and src/sdot_matmul.zig.
-- This tree's `build.zig` and remaining stdlib/asm call sites were ported so `zig build test` compiles on Zig 0.16.0.
-- Zero-allocation and speedup claims from older M1 runs still require independent re-measurement.
-
-**License note (per 2026-05-12 PRE_LAUNCH_CHECKLIST audit):** MIT. znap is intentionally positioned as an embeddable primitive; the sovereign-stack AGPL default is acknowledged as the canon for most public OSS but is documented here as the exception for libraries that downstream projects must link. See LICENSE and AUDIT_NOTES/.
-
-**Evidence pointers:** Historical 31 ns / 33 M evals/s numbers (unverified here) were attributed to NEON SDOT kernels in src/sdot_matmul.zig + src/neon.zig and LinearPolicy/TernaryPolicy in src/policy.zig + src/quantized.zig.
-
-**Benchmark challenge:** Time the 30×6 ternary policy path on your hardware. Do not treat the old 31 ns M1 number as a current bar.
-
----
-
-**Original README follows (lightly annotated for launch).** The content below the line is the pre-polish state from the reconnaissance clone. All new QM narrative, disclosures, and challenge live above + in AUDIT_NOTES/ and the new benchmarks/ challenge subtree.
-
-```
-$ zig build run -- models/stories15M.bin -t 0.9
-
- Once upon a time, there was a little bird who loved to fly in the sky.
- She flew everywhere she went, and the wind was so strong that it made
- the bird feel weak. One day, she met a wise old owl who told her about
- the importance of using her wings to fly...
-
- 128 tokens in 1201ms (106.6 tok/s)
-```
 
 ## Quick Start
 
@@ -86,7 +33,7 @@ curl -L -o models/stories15M.bin https://huggingface.co/karpathy/tinyllamas/reso
 curl -L -o models/tokenizer.bin https://github.com/karpathy/llama2.c/raw/master/tokenizer.bin
 
 # Generate text
-zig build run -- models/stories15M.bin
+zig build run -Doptimize=ReleaseFast -- models/stories15M.bin
 
 # Run benchmarks
 zig build bench
@@ -99,26 +46,26 @@ Requires Zig 0.16. No other dependencies.
 
 ## Performance
 
-Historical Apple M1 reports (unverified on Zig 0.16):
+`zig build bench -Doptimize=ReleaseFast` (inputs are clobbered every call so
+nothing is constant-folded; three runs agreed within 3%):
 
-```
-SIMD dot product (30-dim):       < 1 ns      3.2 billion ops/s
-Linear policy (30→6):             31 ns       33 million evals/s
-DQN 2-layer (30→64→6):          194 ns        5.2 million evals/s
-7-agent ensemble:                222 ns        4.6 million evals/s
-```
+| Operation | Time per eval | Evals/s |
+|---|---:|---:|
+| Linear policy 30→6, f32 | 32 ns | 31.7 M |
+| DQN 30→64→6, f32 | 212 ns | 4.7 M |
+| 7-agent linear ensemble | 234 ns | 4.3 M |
+| Ternary (1.58-bit) linear 30→6 | 82 ns | 12.1 M |
+| Ternary DQN 30→64→6 | 820 ns | 1.2 M |
 
-Compared to equivalent operations in Python:
+Ternary weights are 8x smaller (93 bytes vs 744 for the linear policy) but
+slower than f32 on this CPU: they buy memory, not speed.
 
-| Operation | NumPy | PyTorch | znap | Speedup |
-|-----------|-------|---------|------|---------|
-| Linear 30→6 | 4.28 μs | 3.32 μs | **0.031 μs** | 138× |
-| DQN 30→64→6 | 6.38 μs | 6.69 μs | **0.194 μs** | 34× |
-| 7-agent ensemble | 29.5 μs | 21.3 μs | **0.222 μs** | 96× |
+Text generation, stories15M (6 layers, dim 288), 256 tokens, five runs:
+691-704 tok/s.
 
-Text generation with pretrained stories15M (6 layers, 288 dim, 6 heads):
-- **110 tokens/sec** on Apple M1 CPU
-- Zero dependencies, single binary
+Older README numbers (31 ns on M1, 110 tok/s, NumPy/PyTorch ratios) were
+measured with Zig 0.14 and are superseded by the table above. The Python
+comparison harnesses are in `benchmarks/` and have not been rerun.
 
 ## What's Inside
 
@@ -181,14 +128,10 @@ const result = compressed.evaluate(&features);     // same action, 8× smaller
 ## Benchmarks
 
 ```bash
-zig build bench          # Raw speed benchmarks
-zig build audit          # Honest audit with trained weights
-zig build scaling        # Scaling law experiment
+zig build bench          # Speed benchmarks (table above)
 zig build formal         # Formal verification
-zig build deep-scaling   # DQN scaling curve
-zig build dqn-crossover  # Quantization crossover analysis
 zig build qat            # Quantization-aware training
-zig build margin         # Margin training experiment
+# Not yet ported to Zig 0.16: audit, scaling, deep-scaling, dqn-crossover, margin
 ```
 
 ## Contributing
