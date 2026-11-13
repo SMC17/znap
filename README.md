@@ -129,9 +129,13 @@ const result = compressed.evaluate(&features);     // same action, 8× smaller
 
 ```bash
 zig build bench          # Speed benchmarks (table above)
-zig build formal         # Formal verification
+zig build audit          # Audit with trained weights
+zig build scaling        # Scaling across 7 model sizes
+zig build deep-scaling   # DQN ternary crossover, 100 to 500K params (long run)
+zig build dqn-crossover  # Quantization crossover analysis
 zig build qat            # Quantization-aware training
-# Not yet ported to Zig 0.16: audit, scaling, deep-scaling, dqn-crossover, margin
+zig build margin         # Margin training -> quantization robustness
+zig build formal         # Formal verification
 ```
 
 ## Contributing

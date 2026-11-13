@@ -17,6 +17,7 @@
 // Run: zig build scaling
 
 const std = @import("std");
+const bench_timer = @import("bench_timer.zig");
 const znap = @import("znap");
 
 fn trainAndEval(
@@ -97,13 +98,13 @@ fn trainAndEval(
 
     // Float
     for (0..warmup) |_| std.mem.doNotOptimizeAway(pol.evaluate(&bench_features));
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = bench_timer.Timer.start() catch unreachable;
     for (0..iters) |_| std.mem.doNotOptimizeAway(pol.evaluate(&bench_features));
     const float_ns = timer.read() / iters;
 
     // Ternary
     for (0..warmup) |_| std.mem.doNotOptimizeAway(qpol.evaluate(&bench_features));
-    timer = std.time.Timer.start() catch unreachable;
+    timer = bench_timer.Timer.start() catch unreachable;
     for (0..iters) |_| std.mem.doNotOptimizeAway(qpol.evaluate(&bench_features));
     const ternary_ns = timer.read() / iters;
 
@@ -133,7 +134,8 @@ fn trainAndEval(
     });
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    bench_timer.io = init.io;
     std.debug.print(
         \\
         \\  ╔══════════════════════════════════════════════════════════════════════════════════╗
