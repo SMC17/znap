@@ -5,13 +5,15 @@
 // We train a policy first, THEN quantize and benchmark.
 
 const std = @import("std");
+const bench_timer = @import("bench_timer.zig");
 const znap = @import("znap");
 
 const F = 30;
 const H = 64;
 const A = 6;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    bench_timer.io = init.io;
     std.debug.print(
         \\
         \\  ╔══════════════════════════════════════════════════════════════╗
@@ -69,7 +71,7 @@ pub fn main() !void {
         const warmup = 100_000;
         const iters = 1_000_000;
         for (0..warmup) |_| std.mem.doNotOptimizeAway(linear.evaluate(&features_const));
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = bench_timer.Timer.start() catch unreachable;
         for (0..iters) |_| std.mem.doNotOptimizeAway(linear.evaluate(&features_const));
         const ns = timer.read();
         const us = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(iters)) / 1000.0;
@@ -82,7 +84,7 @@ pub fn main() !void {
         const warmup = 100_000;
         const iters = 1_000_000;
         for (0..warmup) |_| std.mem.doNotOptimizeAway(q_linear.evaluate(&features_const));
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = bench_timer.Timer.start() catch unreachable;
         for (0..iters) |_| std.mem.doNotOptimizeAway(q_linear.evaluate(&features_const));
         const ns = timer.read();
         const us = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(iters)) / 1000.0;
@@ -95,7 +97,7 @@ pub fn main() !void {
         const warmup = 100_000;
         const iters = 1_000_000;
         for (0..warmup) |_| std.mem.doNotOptimizeAway(dqn.evaluate(&features_const));
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = bench_timer.Timer.start() catch unreachable;
         for (0..iters) |_| std.mem.doNotOptimizeAway(dqn.evaluate(&features_const));
         const ns = timer.read();
         const us = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(iters)) / 1000.0;
@@ -108,7 +110,7 @@ pub fn main() !void {
         const warmup = 100_000;
         const iters = 1_000_000;
         for (0..warmup) |_| std.mem.doNotOptimizeAway(q_dqn.evaluate(&features_const));
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = bench_timer.Timer.start() catch unreachable;
         for (0..iters) |_| std.mem.doNotOptimizeAway(q_dqn.evaluate(&features_const));
         const ns = timer.read();
         const us = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(iters)) / 1000.0;
