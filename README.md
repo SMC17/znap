@@ -16,7 +16,7 @@ $ zig build run -Doptimize=ReleaseFast -- models/stories15M.bin
 ## Status
 
 **Unit-tested, benchmarked on one machine.** `zig build test --summary all`:
-625/625 on Zig 0.16.0. Numbers below were measured on 2026-11-12, Apple M2 Max,
+631/631 on Zig 0.16.0. Numbers below were measured on 2026-11-12, Apple M2 Max,
 macOS, Zig 0.16.0, ReleaseFast, with the commands shown. They are one machine,
 not a general claim; run them on yours.
 
