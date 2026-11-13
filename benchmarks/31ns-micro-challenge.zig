@@ -9,15 +9,13 @@ const std = @import("std");
 // Build: zig build-exe 31ns-micro-challenge.zig -O ReleaseFast
 // Run: ./31ns-micro-challenge
 //
-// Falsifier (pre-registered stax-experiment znap:31ns-m1-linear):
+// Falsifier:
 //   On equivalent Apple M1-class hardware + Zig 0.14 ReleaseFast + NEON path,
 //   median time per eval > 62 ns across 1M iterations (or action selection
 //   mismatches reference in >0.1% of cases) → claim refuted.
 //
 // Cross-lang harness: see 31ns-micro-challenge.py for NumPy baseline.
 //
-// This is sovereign micro-prediction ammo under Quantitative Mercantilism.
-// Embed it. Time it. Beat it on your silicon. Then tell the story with receipts.
 
 const F: usize = 30;
 const A: usize = 6;

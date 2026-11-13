@@ -10,39 +10,54 @@ const F = 30; // Feature dimension
 const H = 64; // Hidden dimension
 const A = 6;  // Action dimension
 
-const features: [F]f32 = blk: {
+var features: [F]f32 = blk: {
     var f: [F]f32 = undefined;
     for (0..F) |i| f[i] = @as(f32, @floatFromInt(i)) / @as(f32, F);
     break :blk f;
 };
-const ones: [F]f32 = [_]f32{1.0} ** F;
+var ones: [F]f32 = [_]f32{1.0} ** F;
 
-const bandit = znap.policy.LinearPolicy(F, A).init();
-const dqn = znap.policy.DQNPolicy(F, H, A).initXavier(42);
-const ensemble = znap.policy.Ensemble(7, F, A).init();
-const ternary_bandit = znap.quantized.TernaryPolicy(F, A).init();
-const ternary_dqn = znap.quantized.TernaryDQN(F, H, A).init();
+var bandit = znap.policy.LinearPolicy(F, A).init();
+var dqn = znap.policy.DQNPolicy(F, H, A).initXavier(42);
+var ensemble = znap.policy.Ensemble(7, F, A).init();
+var ternary_bandit = znap.quantized.TernaryPolicy(F, A).init();
+var ternary_dqn = znap.quantized.TernaryDQN(F, H, A).init();
 
-fn bench(comptime name: []const u8, comptime iters: usize, comptime func: fn () callconv(.Unspecified) void) void {
+var g_io: std.Io = undefined;
+
+/// Tell the optimizer inputs may change every call (no constant folding,
+/// no hoisting the evaluation out of the timing loop).
+inline fn clobber() void {
+    std.mem.doNotOptimizeAway(&features);
+    std.mem.doNotOptimizeAway(&ones);
+    std.mem.doNotOptimizeAway(&bandit);
+    std.mem.doNotOptimizeAway(&dqn);
+    std.mem.doNotOptimizeAway(&ensemble);
+    std.mem.doNotOptimizeAway(&ternary_bandit);
+    std.mem.doNotOptimizeAway(&ternary_dqn);
+}
+
+fn bench(comptime name: []const u8, comptime iters: usize, comptime func: fn () callconv(.auto) void) void {
     for (0..iters / 10) |_| func(); // warmup
-    var timer = std.time.Timer.start() catch unreachable;
+    const t0 = std.Io.Clock.awake.now(g_io);
     for (0..iters) |_| func();
-    const ns = timer.read();
+    const ns: u64 = @intCast(t0.durationTo(std.Io.Clock.awake.now(g_io)).nanoseconds);
     const us = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(iters)) / 1000.0;
     const ops_per_sec = @as(f64, @floatFromInt(iters)) / (@as(f64, @floatFromInt(ns)) / 1e9);
     std.debug.print("  {s:<45} {d:>8.3} us  {d:>12.0} ops/s\n", .{ name, us, ops_per_sec });
 }
 
-fn benchDot() void { std.mem.doNotOptimizeAway(znap.simd.vdot(F, &features, &ones)); }
-fn benchSoftmax() void { std.mem.doNotOptimizeAway(znap.simd.vsoftmax(A, &[A]f32{ 1, 2, 3, 4, 5, 6 })); }
-fn benchRelu() void { std.mem.doNotOptimizeAway(znap.simd.vrelu(H, &[_]f32{-0.5} ** H)); }
-fn benchBandit() void { std.mem.doNotOptimizeAway(bandit.evaluate(&features)); }
-fn benchDQN() void { std.mem.doNotOptimizeAway(dqn.evaluate(&features)); }
-fn benchEnsemble() void { std.mem.doNotOptimizeAway(ensemble.evaluateAll(&features)); }
-fn benchTernaryBandit() void { std.mem.doNotOptimizeAway(ternary_bandit.evaluate(&features)); }
-fn benchTernaryDQN() void { std.mem.doNotOptimizeAway(ternary_dqn.evaluate(&features)); }
+fn benchDot() void { clobber(); std.mem.doNotOptimizeAway(znap.simd.vdot(F, &features, &ones)); }
+fn benchSoftmax() void { clobber(); std.mem.doNotOptimizeAway(znap.simd.vsoftmax(A, &[A]f32{ 1, 2, 3, 4, 5, 6 })); }
+fn benchRelu() void { clobber(); std.mem.doNotOptimizeAway(znap.simd.vrelu(H, &[_]f32{-0.5} ** H)); }
+fn benchBandit() void { clobber(); std.mem.doNotOptimizeAway(bandit.evaluate(&features)); }
+fn benchDQN() void { clobber(); std.mem.doNotOptimizeAway(dqn.evaluate(&features)); }
+fn benchEnsemble() void { clobber(); std.mem.doNotOptimizeAway(ensemble.evaluateAll(&features)); }
+fn benchTernaryBandit() void { clobber(); std.mem.doNotOptimizeAway(ternary_bandit.evaluate(&features)); }
+fn benchTernaryDQN() void { clobber(); std.mem.doNotOptimizeAway(ternary_dqn.evaluate(&features)); }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    g_io = init.io;
     const arch = @tagName(@import("builtin").cpu.arch);
     const os = @tagName(@import("builtin").os.tag);
 
