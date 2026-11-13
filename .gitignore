@@ -6,3 +6,6 @@ zig-out/
 *.dylib
 models/*.bin
 models/*.gguf
+test_asm
+test_sdot_q5
+models/
