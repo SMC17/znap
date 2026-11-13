@@ -191,6 +191,7 @@ pub fn build(b: *std.Build) void {
         "src/w8a8.zig",
         "src/sdot_matmul.zig",
         "src/neon.zig",
+        "src/llama2.zig",
         "src/znap.zig",
     };
 
