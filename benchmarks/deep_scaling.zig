@@ -13,6 +13,7 @@
 // Run: zig build deep-scaling
 
 const std = @import("std");
+const bench_timer = @import("bench_timer.zig");
 const znap = @import("znap");
 
 fn trainAndQuantize(
@@ -96,12 +97,12 @@ fn trainAndQuantize(
 
     const iters = 100_000;
     for (0..iters / 10) |_| std.mem.doNotOptimizeAway(result.dqn.evaluate(&bench_features));
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = bench_timer.Timer.start() catch unreachable;
     for (0..iters) |_| std.mem.doNotOptimizeAway(result.dqn.evaluate(&bench_features));
     const float_ns = timer.read() / iters;
 
     for (0..iters / 10) |_| std.mem.doNotOptimizeAway(q_tern.evaluate(&bench_features));
-    timer = std.time.Timer.start() catch unreachable;
+    timer = bench_timer.Timer.start() catch unreachable;
     for (0..iters) |_| std.mem.doNotOptimizeAway(q_tern.evaluate(&bench_features));
     const tern_ns = timer.read() / iters;
 
@@ -127,10 +128,9 @@ fn trainAndQuantize(
     });
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    bench_timer.io = init.io;
+    const allocator = init.gpa;
 
     std.debug.print(
         \\

@@ -20,6 +20,7 @@
 // Run: zig build dqn-crossover
 
 const std = @import("std");
+const bench_timer = @import("bench_timer.zig");
 const znap = @import("znap");
 
 const TRAIN_STEPS: usize = 200_000;
@@ -197,12 +198,12 @@ fn evalAndReport(
     const warmup = 50_000;
 
     for (0..warmup) |_| std.mem.doNotOptimizeAway(pol.evaluate(&bench_features));
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = bench_timer.Timer.start() catch unreachable;
     for (0..iters) |_| std.mem.doNotOptimizeAway(pol.evaluate(&bench_features));
     const float_ns = timer.read() / iters;
 
     for (0..warmup) |_| std.mem.doNotOptimizeAway(qpol.evaluate(&bench_features));
-    timer = std.time.Timer.start() catch unreachable;
+    timer = bench_timer.Timer.start() catch unreachable;
     for (0..iters) |_| std.mem.doNotOptimizeAway(qpol.evaluate(&bench_features));
     const ternary_ns = timer.read() / iters;
 
@@ -256,7 +257,8 @@ fn runScale(
     evalAndReport(F, H, A, label, &pol);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    bench_timer.io = init.io;
     std.debug.print(
         \\
         \\  +==============================================================================+
