@@ -9,16 +9,16 @@
 // amplifies this effect."
 
 const std = @import("std");
+const bench_timer = @import("bench_timer.zig");
 const znap = @import("znap");
 
 const F = 16;
 const H = 32;
 const A = 4;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    bench_timer.io = init.io;
+    const allocator = init.gpa;
 
     std.debug.print(
         \\
