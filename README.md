@@ -1,5 +1,7 @@
 # znap
 
+**[Status](STATUS.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/SMC17/znap/issues) · [All SMC17 work](https://github.com/users/SMC17/projects/16)**
+
 Zero-allocation neural inference in Zig 0.16: small RL policies in tens of
 nanoseconds, and llama2.c-format text generation. No Python, no PyTorch, no
 dependencies. MIT.
