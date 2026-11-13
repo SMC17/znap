@@ -10,14 +10,18 @@
 const std = @import("std");
 const llama2 = @import("znap").llama2;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+var g_io: std.Io = undefined;
+
+fn nowNs() i96 {
+    return std.Io.Clock.awake.now(g_io).nanoseconds;
+}
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    g_io = init.io;
 
     // Parse args
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var model_path: []const u8 = "models/stories15M.bin";
     var tokenizer_path: []const u8 = "models/tokenizer.bin";
@@ -40,7 +44,10 @@ pub fn main() !void {
         }
     }
 
-    const stderr = std.io.getStdErr().writer();
+    var errbuf: [1024]u8 = undefined;
+    var errw = std.Io.File.stderr().writerStreaming(g_io, &errbuf);
+    const stderr = &errw.interface;
+    defer stderr.flush() catch {};
 
     // Detect format by extension
     const is_gguf = std.mem.endsWith(u8, model_path, ".gguf");
@@ -84,11 +91,14 @@ fn runGGUF(
     defer state.deinit(allocator);
 
     // Generate
-    var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+    var prng = std.Random.DefaultPrng.init(@truncate(@as(u96, @bitCast(std.Io.Clock.real.now(g_io).nanoseconds))));
     var rng = prng.random();
 
-    const stdout = std.io.getStdOut().writer();
-    var timer = try std.time.Timer.start();
+    var outbuf: [4096]u8 = undefined;
+    var outw = std.Io.File.stdout().writerStreaming(g_io, &outbuf);
+    const stdout = &outw.interface;
+    defer stdout.flush() catch {};
+    const t0 = nowNs();
 
     // Use BOS token from GGUF metadata or default to 1
     var token: u32 = 1;
@@ -129,7 +139,7 @@ fn runGGUF(
         actual_tokens += 1;
     }
 
-    const elapsed_ns = timer.read();
+    const elapsed_ns = nowNs() - t0;
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1e6;
     const tokens_per_sec = @as(f64, @floatFromInt(actual_tokens)) / (elapsed_ms / 1000.0);
 
@@ -174,16 +184,19 @@ fn runBin(
     defer state.deinit(allocator);
 
     // Generate
-    var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+    var prng = std.Random.DefaultPrng.init(@truncate(@as(u96, @bitCast(std.Io.Clock.real.now(g_io).nanoseconds))));
     var rng = prng.random();
 
-    const stdout = std.io.getStdOut().writer();
+    var outbuf: [4096]u8 = undefined;
+    var outw = std.Io.File.stdout().writerStreaming(g_io, &outbuf);
+    const stdout = &outw.interface;
+    defer stdout.flush() catch {};
 
-    var timer = try std.time.Timer.start();
+    const t0 = nowNs();
 
     try llama2.generate(&model, &tokenizer_inst, &state, "", max_tokens, temperature, &rng, stdout);
 
-    const elapsed_ns = timer.read();
+    const elapsed_ns = nowNs() - t0;
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1e6;
     const tokens_per_sec = @as(f64, @floatFromInt(max_tokens)) / (elapsed_ms / 1000.0);
 

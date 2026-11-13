@@ -7,10 +7,9 @@ Run:
   python3 31ns-micro-challenge.py
 
 This is the "NumPy tax" reference. The Zig challenge (31ns-micro-challenge.zig)
-is the sovereign zero-dep alternative. Target: show the 30-100x gap on micro
-workloads that matter for real-time QM decision tollbooths.
+workloads.
 
-Falsifier (tied to stax-experiment znap:speedup-methodology):
+Falsifier:
   If a faithful single-threaded NumPy implementation of the exact same
   30x6 matvec + softmax/argmax on the same host is not at least 20x slower
   than the Zig scalar (or NEON) path in the .zig challenge, the speedup
@@ -52,5 +51,4 @@ print(f"Per eval: {per_eval_us:.1f} us")
 print(f"Evals/s : {evals_per_sec/1e6:.2f} M")
 print("\nReference (Zig on M1 NEON): 0.031 us (31 ns) → ~138x gap on this class of op.")
 print("Run the .zig challenge on the same host for direct comparison.")
-print("QM point: this Python tax is exactly the rent sovereign stacks refuse to pay at the micro-prediction layer.")
 print("Falsifier registered; beat the methodology or the gap disappears.\n")

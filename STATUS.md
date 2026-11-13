@@ -1,15 +1,12 @@
-# znap status (Zig 0.16)
+# znap status
 
-Last check: 2026-08-20. Host Zig: **0.16.0**.
-Experiment: `exp-1787257292-956995154` (verdict: **confirmed**).
+Last check: 2026-11-12, Zig 0.16.0, Apple M2 Max, macOS.
 
-`zig build test --summary all` on this tree: **51/51 steps succeeded;
-617/617 tests passed**. Proof level: **unit-tested** for the package test
-step on this host/toolchain.
+- `zig build test --summary all`: 51/51 steps, 625/625 tests. Proof level: **unit-tested**.
+- `zig build bench -Doptimize=ReleaseFast`: see the README table. Proof level: **benchmarked** (one machine, three runs).
+- `zig build run -Doptimize=ReleaseFast -- models/stories15M.bin`: 691-704 tok/s over five runs.
+- Not yet ported to 0.16: the `audit`, `scaling`, `deep-scaling`, `dqn-crossover` and `margin` experiment binaries.
 
-What was ported beyond the Build API: inline-asm clobber structs, cwd file
-I/O via `std.Io`, ArrayList `.empty`, in-memory weight streams, `std.enums.fromInt`,
-and CUDA env detection without `getEnvVarOwned`.
-
-Historical 31 ns / tok/s figures were **not** re-measured. They are
-historical / unverified, not a current proof. Keep the repository private.
+Retired: the 31 ns / 110 tok/s M1 numbers from Zig 0.14 builds. The M2 Max
+linear-policy result (32 ns) is in the same range; it is a new measurement,
+not a confirmation of the old one.
