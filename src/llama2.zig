@@ -915,7 +915,7 @@ pub const Tokenizer = struct {
 
     pub fn decode(self: *const Tokenizer, token: u32) []const u8 {
         if (token >= self.vocab_size) return "<unk>";
-        return self.vocab[token];
+        return rawByte(self.vocab[token]);
     }
 
     /// Look up a vocab entry by exact string match. O(vocab_size) linear
@@ -1383,6 +1383,27 @@ pub const GGUFTokenizer = struct {
         return self.vocab[token];
     }
 };
+
+const byte_table: [256]u8 = blk: {
+    var b: [256]u8 = undefined;
+    for (0..256) |i| b[i] = @intCast(i);
+    break :blk b;
+};
+
+/// llama2.c / SentencePiece byte-fallback pieces look like "<0x0A>"; emit the raw byte.
+pub fn rawByte(piece: []const u8) []const u8 {
+    if (piece.len == 6 and std.mem.startsWith(u8, piece, "<0x") and piece[5] == '>') {
+        const v = std.fmt.parseInt(u8, piece[3..5], 16) catch return piece;
+        return byte_table[v .. v + 1];
+    }
+    return piece;
+}
+
+test "rawByte maps byte-fallback pieces" {
+    try std.testing.expectEqualStrings("\n", rawByte("<0x0A>"));
+    try std.testing.expectEqualStrings("hello", rawByte("hello"));
+    try std.testing.expectEqualStrings("<0xZZ>", rawByte("<0xZZ>"));
+}
 
 // ── GGUF Model ──────────────────────────────────────────────────────
 
