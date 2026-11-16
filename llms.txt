@@ -1,0 +1,14 @@
+# znap (`SMC17/znap`)
+
+> Zero-allocation neural inference in Zig 0.16: RL policies in ~32 ns, llama2.c text generation at ~700 tok/s (M2 Max), no dependencies.
+
+## Repository & Docs
+- **Repository**: https://github.com/SMC17/znap
+- [README](https://github.com/SMC17/znap/blob/main/README.md)
+- [Build](https://github.com/SMC17/znap/blob/main/build.zig)
+- [Benchmarks](https://github.com/SMC17/znap/tree/main/benchmarks) & [Examples](https://github.com/SMC17/znap/tree/main/examples)
+- [Source](https://github.com/SMC17/znap/tree/main/src)
+
+## Ecosystem & Author
+- **Unified Substrate (`SMC17/zinging`)**: https://github.com/SMC17/zinging
+- **Author / Org**: https://github.com/SMC17
