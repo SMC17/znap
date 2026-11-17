@@ -1,6 +1,6 @@
 # znap status
 
-Last check: 2026-11-12, Zig 0.16.0, Apple M2 Max, macOS.
+Last check: 2026-11-17, Zig 0.16.0, Apple M2 Max, macOS.
 
 - `zig build test --summary all`: 53/53 steps, 631/631 tests. Proof level: **unit-tested**.
 - `zig build bench -Doptimize=ReleaseFast`: see the README table. Proof level: **benchmarked** (one machine, three runs).
